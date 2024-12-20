@@ -20,19 +20,19 @@ config.epoch_tframe = [-50, 150]; % Epoch window in ms
 config.newadrate = 1000;          % Resampling rate
 config.filters.lfp = [0.5, 300];  % LFP filter range (Hz)
 config.filters.mua = [300, 5000]; % MUA filter range (Hz)
-config.trigger_channel = 94;  % Default analog trigger channel
-config.channels = [2:25];             % Auto-detect raw channels
+config.trigger_channel = 93;  %  analog trigger channel for aud
+config.channels = [2:25];             % ephys data channels
 config.trigger_method = 'analog'; % 'events' or 'analog'
-config.trigger_threshold = 0.5;   % Threshold for analog trigger detection
+config.trigger_threshold = 50;   % Threshold for analog trigger detection
 config.event_entity_id = 1;       % Default Event Entity ID
 config.artifact_threshold = 3;    % Z-score threshold for artifact rejection
 
 try
     % Call the main data import function
     data_import_v2(inputDir, fileName, config);
-    fprintf('Data import and preprocessing complete!\n');
+    fprintf('importing\n');
 catch ME
-    % Handle errors gracefully
+    % Handle errors 
     fprintf('An error occurred: %s\n', ME.message);
 end
 
@@ -56,8 +56,8 @@ function data_import_v2(directory1, fileName, config)
         error('Failed to open file: %s', ns_RESULT);
     end
 
-    % Separate entities into raw and analog categories
-    [rawChannels, analogChannels] = classify_channels(hFile);
+    % Separate entities into raw (data) and analog (stimuli and eye mvmt) categories
+    [rawChannels, ~] = classify_channels(hFile);
 
     % Handle triggers
     if strcmp(config.trigger_method, 'analog')
@@ -67,11 +67,12 @@ function data_import_v2(directory1, fileName, config)
         triggers = get_event_triggers(hFile, config.event_entity_id);
     end
 
-    % Process Raw Data
+    % get Raw Data
+    config.channels;
     rawData = get_channel_data(hFile, rawChannels);
-
-    % Process Analog Data (e.g., eye position, stimulus)
-    analogData = get_channel_data(hFile, analogChannels);
+    
+    % get the eyelink data
+    timingResults = import_timing_results(directory1, filename);
 
     % Filter Raw Data
     [lfp, mua, csd] = filter_data(rawData, config);
@@ -85,8 +86,7 @@ function data_import_v2(directory1, fileName, config)
     % Save Results
     save_results(directory1, fileName, eegLFP, eegMUA, eegCSD, analogData, triggers);
 
-    % Close File
-    ns_CloseFile(hFile);
+    
 end
 
 function [rawChannels, analogChannels] = classify_channels(hFile)
@@ -117,27 +117,155 @@ end
 
 
 function triggers = get_analog_triggers(hFile, analogChannel, threshold)
-    % Detect triggers in analog data
+    % GET_ANALOG_TRIGGERS - Detect first pulse of each pulse train in analog data
+    %
+    % Parameters:
+    % hFile          - Handle to the Neuroshare file
+    % analogChannel  - Analog channel ID
+    % threshold      - Threshold for detecting rising edges
+    % fs             - Sampling rate (Hz) of the analog data
+    %
+    % Output:
+    % triggers       - Indices of the first pulse of each train
     
     % Retrieve analog data
-    [ns_RESULT, ContCount, analogData] = ns_GetAnalogData(hFile, analogChannel, 1, hFile.Entity(analogChannel).Count);
+    [ns_RESULT, ~, analogData] = ns_GetAnalogData(hFile, analogChannel, 1, hFile.Entity(analogChannel).Count);
 
     % Error handling for invalid data retrieval
     if ~strcmp(ns_RESULT, 'ns_OK')
         error('Error retrieving analog data: %s', ns_RESULT);
     end
-    plot(1:length(analogData),analogData)
-    % Detect rising edges based on threshold
-    triggers = find(diff(analogData > threshold) == 1); % Rising edge detection
+    
+    % Given string
+    samplingRateStr = '30 ksamp/sec';
+
+    % Check if the string matches '30 ksamp/sec'
+    if strcmp(samplingRateStr, '30 ksamp/sec')
+        fs = 30000; % highest fs in ripple system
+        disp('found 30 ksamp/sec.');
+    else
+        disp('maybe not 30 ksamp/sec.');
+    end
+    % Detect all rising edges where the signal crosses the threshold
+    allTriggers = find(diff(analogData > threshold) == 1); % Rising edge detection
+    
+    % Time difference threshold to separate trains
+    % For 40 Hz pulse trains, period = 1/40 = 0.025 sec (25 ms)
+    % For 100 Hz pulse trains, period = 1/100 = 0.01 sec (10 ms)
+    minPulseGap = 0.15 * fs; % Minimum gap in samples to consider a new pulse train
+
+    % Initialize the list of first pulses
+    triggers = [];
+    lastPulse = -inf; % Track the last pulse's index
+
+    % Loop through all detected triggers
+    for i = 1:length(allTriggers)
+        if allTriggers(i) - lastPulse > minPulseGap
+            % If enough time has passed, this is the start of a new train
+            triggers(end + 1) = allTriggers(i); %#ok<AGROW>
+            lastPulse = allTriggers(i);
+        end
+    end
+
+    % Optional: Plot the signal and detected triggers
+%     figure;
+%     plot(1:length(analogData), analogData);
+%     hold on;
+%     plot(triggers, analogData(triggers), 'ro', 'MarkerSize', 8, 'LineWidth', 2);
+%     title('Analog Signal with Detected Triggers');
+%     xlabel('Sample Index');
+%     ylabel('Analog Signal');
+%     legend('Analog Signal', 'First Pulse of Train');
+%     hold off;
 end
 
 
-function [lfp, mua, csd] = filter_data(rawData, config)
-    % Filter raw data into LFP, MUA, and CSD
-    lfp = bandpass_filter(rawData, config.filters.lfp, config.newadrate);
-    mua = bandpass_filter(rawData, config.filters.mua, config.newadrate);
-    csd = calculate_csd(lfp);
+
+function timingResults = import_timing_results(dataDirectory, filename)
+    % IMPORT_TIMING_RESULTS - Imports the TIMING_RESULTS file
+    % Searches for a subdirectory in 'edf' matching the filename (minus extension),
+    % then imports 'TIMING_RESULTS' from within the matching subdirectory.
+    %
+    % Parameters:
+    % dataDirectory: The main data directory containing the edf folder.
+    % filename: Name of the current data file (e.g., 'pt027000029.nev').
+    %
+    % Output:
+    % timingResults: Struct containing extracted timing data.
+
+    %% Step 1: Locate the 'edf' Subdirectory
+    edfDir = fullfile(dataDirectory, 'edf');
+    if ~isfolder(edfDir)
+        error('The ''edf'' subdirectory does not exist in: %s', dataDirectory);
+    end
+
+    % Remove file extension from filename
+    [~, baseFilename, ~] = fileparts(filename);
+    fprintf('Searching for subdirectory: %s in %s\n', baseFilename, edfDir);
+
+    %% Step 2: Search for Matching Subdirectory
+    subdirs = dir(edfDir);  % List all items in the 'edf' directory
+    isDir = [subdirs.isdir];
+    subdirs = subdirs(isDir);  % Keep only directories
+
+    % Find a subdirectory that matches the filename
+    matchingSubdir = '';
+    for i = 1:length(subdirs)
+        if strcmp(subdirs(i).name, baseFilename)
+            matchingSubdir = fullfile(edfDir, subdirs(i).name);
+            break;
+        end
+    end
+
+    if isempty(matchingSubdir)
+        error('No subdirectory matching "%s" was found in: %s', baseFilename, edfDir);
+    end
+
+    %% Step 3: Locate and Import TIMING_RESULTS
+    timingFilePath = fullfile(matchingSubdir, 'TIMING_RESULTS');
+    if ~exist(timingFilePath, 'file')
+        error('TIMING_RESULTS file not found in: %s', matchingSubdir);
+    end
+    
+    fprintf('Loading TIMING_RESULTS from: %s\n', timingFilePath);
+    [fid, message] = fopen(timingFilePath, 'rt');
+    if fid == -1
+        error('Error opening TIMING_RESULTS file: %s', message);
+    end
+    
+    % Initialize storage for lines
+    timingResults.RawLines = {};
+    I = 1;
+
+    % Read file line by line
+    while ~feof(fid)
+        timingResults.RawLines{I, 1} = fgetl(fid);
+        I = I + 1;
+    end
+    fclose(fid);
+    
+    %% Step 4: Extract Relevant Timing Information
+    fprintf('Extracting timing information...\n');
+    timingResults.nLines = length(timingResults.RawLines);
+    timingResults.TrialStartTimes = [];
+    
+    for lineIdx = 1:timingResults.nLines
+        currentLine = strtrim(timingResults.RawLines{lineIdx});
+        
+        if contains(currentLine, 'TRIALID')
+            splitLine = strsplit(currentLine);
+            trialTime = str2double(splitLine{2});
+            if ~isnan(trialTime)
+                timingResults.TrialStartTimes(end + 1) = trialTime; %#ok<AGROW>
+            end
+        end
+    end
+    
+    %% Step 5: Summary
+    fprintf('Total lines read: %d\n', timingResults.nLines);
+    fprintf('Trial start times extracted: %d\n', length(timingResults.TrialStartTimes));
 end
+
 
 function [eegLFP, eegMUA, eegCSD] = epoch_data(lfp, mua, csd, triggers, config)
     % Epoch data around triggers
