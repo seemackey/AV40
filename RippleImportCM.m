@@ -70,7 +70,8 @@ function data_import_v2(directory1, fileName, config)
     end
 
     % get Data
-    rawData = get_channel_data(hFile, config.channels);
+    channels = config.channels;
+    rawData = get_channel_data(hFile, channels);
     
     
 
@@ -84,9 +85,16 @@ function data_import_v2(directory1, fileName, config)
 
     % Filter Raw Data
     filtertype=1;
-    [~, cnte, cntm, cntc, ~, ~] = module_cnt05(rawData, config.newadrate, config.filters.lfp, config.filters.mua, filtertype);
+    disp('filtering')
+    newadrate = config.newadrate;
+    filtere = config.filters.lfp;
+    filterm = config.filters.mua;
+    fs = 30000; %assumed for ripple analog fs
+    
+    [~, cnte, cntm, cntc, ~, ~] = module_filtcont(rawData, newadrate, filtere, filterm, filtertype,fs);
 
     % Epoch Data
+    disp('epoching')
     [eegLFP, eegMUA, eegCSD] = epoch_data(cnte, cntm, cntc, triggers, config);
 
     % Reject Artifacts
@@ -96,7 +104,8 @@ function data_import_v2(directory1, fileName, config)
     timingResults = AV40_importEyelink(directory1, fileName);
 
     % Save Results
-    save_results(directory1, fileName, eegLFP, eegMUA, eegCSD, triggers,timingResults);
+    disp('saving')
+    save_results(directory1, fileName, eegLFP, eegMUA, eegCSD, triggers,timingResults,rawData,config);
 
     
 end
@@ -120,6 +129,7 @@ function rawData = remap_channels(rawData)
     remappedData(X1, :) = rawData(X, :); % Even -> Odd
 
     rawData = remappedData;
+    disp('done remapping')
 end
 
 
@@ -438,9 +448,9 @@ function [eegLFP, eegMUA, eegCSD, triggers] = reject_artifacts(eegLFP, eegMUA, e
     triggers(outliers) = [];
 end
 
-function save_results(directory, fileName, eegLFP, eegMUA, eegCSD, analogData, triggers,eyelinkTiming)
+function save_results(directory, fileName, eegLFP, eegMUA, eegCSD, triggers,eyelinkTiming,cont_data,config)
     % Save processed data
-    save(fullfile(directory, [fileName '_epoched.mat']), 'eegLFP', 'eegMUA', 'eegCSD', 'triggers','eyelinkTiming');
+    save(fullfile(directory, [fileName '_imported.mat']), 'eegLFP', 'eegMUA', 'eegCSD', 'triggers','eyelinkTiming','cont_data','config');
 end
 
 function config = get_default_config()
