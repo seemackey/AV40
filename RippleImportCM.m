@@ -21,7 +21,8 @@ config.newadrate = 1000;          % Resampling rate
 config.filters.lfp = [0.5, 300];  % LFP filter range (Hz)
 config.filters.mua = [300, 5000]; % MUA filter range (Hz)
 config.trigger_channel = 93;  %  analog trigger channel for aud
-config.channels = [2:25];             % ephys data channels
+config.channels = [1:24];             % ephys data channels
+config.channel_remap = true; % Enable channel remapping by default
 config.trigger_method = 'analog'; % 'events' or 'analog'
 config.trigger_threshold = 50;   % Threshold for analog trigger detection
 config.event_entity_id = 1;       % Default Event Entity ID
@@ -63,31 +64,64 @@ function data_import_v2(directory1, fileName, config)
     if strcmp(config.trigger_method, 'analog')
         triggerChannel = config.trigger_channel; % Specify analog channel for triggers
         triggers = get_analog_triggers(hFile, triggerChannel, config.trigger_threshold);
-    else
+    else %digital triggers don't work yet, sorrrryyyyyy
+        disp('no analog triggers? check analog trig chan')
         triggers = get_event_triggers(hFile, config.event_entity_id);
     end
 
-    % get Raw Data
-    config.channels;
-    rawData = get_channel_data(hFile, rawChannels);
+    % get Data
+    rawData = get_channel_data(hFile, config.channels);
     
-    % get the eyelink data
-    timingResults = import_timing_results(directory1, filename);
+    
+
+    % Check if remapping is needed
+    if isfield(config, 'channel_remap') == 1
+        rawData = remap_channels(rawData);
+    end
+
+    
+
 
     % Filter Raw Data
-    [lfp, mua, csd] = filter_data(rawData, config);
+    filtertype=1;
+    [~, cnte, cntm, cntc, ~, ~] = module_cnt05(rawData, config.newadrate, config.filters.lfp, config.filters.mua, filtertype);
 
     % Epoch Data
-    [eegLFP, eegMUA, eegCSD] = epoch_data(lfp, mua, csd, triggers, config);
+    [eegLFP, eegMUA, eegCSD] = epoch_data(cnte, cntm, cntc, triggers, config);
 
     % Reject Artifacts
     [eegLFP, eegMUA, eegCSD, triggers] = reject_artifacts(eegLFP, eegMUA, eegCSD, triggers, config);
+    
+    % get the eyelink data
+    timingResults = AV40_importEyelink(directory1, fileName);
 
     % Save Results
-    save_results(directory1, fileName, eegLFP, eegMUA, eegCSD, analogData, triggers);
+    save_results(directory1, fileName, eegLFP, eegMUA, eegCSD, triggers,timingResults);
 
     
 end
+
+function rawData = remap_channels(rawData)
+    % REMAP_CHANNELS - Adjusts raw data channels to correct hardware mismatch
+    %
+    % Parameters:
+    % rawData: Original raw electrophysiology data matrix (channels x samples)
+    %
+    % Output:
+    % rawData: Remapped raw data with corrected channel alignment
+
+    fprintf('Applying channel remapping to correct alignment mismatch...\n');
+    X = 1:2:size(rawData, 1) - 1; % Odd indices
+    X1 = 2:2:size(rawData, 1);    % Even indices
+
+    % Swap channels
+    remappedData = rawData; % Copy original data
+    remappedData(X, :) = rawData(X1, :); % Odd -> Even
+    remappedData(X1, :) = rawData(X, :); % Even -> Odd
+
+    rawData = remappedData;
+end
+
 
 function [rawChannels, analogChannels] = classify_channels(hFile)
     % Classify channels as raw or analog based on labels
@@ -106,13 +140,23 @@ function [rawChannels, analogChannels] = classify_channels(hFile)
 end
 
 function data = get_channel_data(hFile, channels)
-    % Retrieve data for specified channels
+    % GET_CHANNEL_DATA - Retrieve data for specified channels sequentially
+    %
+    % Parameters:
+    % hFile: Handle to the Neuroshare file
+    % channels: Array of channel IDs to import
+    %
+    % Output:
+    % data: Matrix (channels x samples) of retrieved analog data
+    
     data = [];
     for ch = channels
         [~, ~, channelData] = ns_GetAnalogData(hFile, ch, 1, 1e8);
         data = [data; channelData']; %#ok<AGROW> Transpose for consistency
     end
 end
+
+
 
 
 
@@ -158,7 +202,7 @@ function triggers = get_analog_triggers(hFile, analogChannel, threshold)
     triggers = [];
     lastPulse = -inf; % Track the last pulse's index
 
-    % Loop through all detected triggers
+    % Loop through all detected triggers and just get stim onset
     for i = 1:length(allTriggers)
         if allTriggers(i) - lastPulse > minPulseGap
             % If enough time has passed, this is the start of a new train
@@ -179,92 +223,193 @@ function triggers = get_analog_triggers(hFile, analogChannel, threshold)
 %     hold off;
 end
 
-
-
-function timingResults = import_timing_results(dataDirectory, filename)
-    % IMPORT_TIMING_RESULTS - Imports the TIMING_RESULTS file
-    % Searches for a subdirectory in 'edf' matching the filename (minus extension),
-    % then imports 'TIMING_RESULTS' from within the matching subdirectory.
+function data = get_triggered_channel_data(hFile, channels, triggers, preTrigger, postTrigger, samplingRate)
+    % GET_TRIGGERED_CHANNEL_DATA - Import channel data around trigger times
     %
     % Parameters:
-    % dataDirectory: The main data directory containing the edf folder.
-    % filename: Name of the current data file (e.g., 'pt027000029.nev').
+    % hFile: Handle to the Neuroshare file
+    % channels: Array of channel IDs to import
+    % triggers: Array of trigger timestamps (in seconds)
+    % preTrigger: Time (in seconds) before each trigger to include
+    % postTrigger: Time (in seconds) after each trigger to include
+    % samplingRate: Sampling rate of the analog data (Hz)
     %
     % Output:
-    % timingResults: Struct containing extracted timing data.
+    % data: 3D Matrix (channels x triggers x samples per epoch)
 
+    fprintf('Importing data around triggers from %d channels...\n', length(channels));
+
+    % Calculate the number of samples per epoch
+    samplesPerEpoch = round((preTrigger + postTrigger) * samplingRate);
+    numTriggers = length(triggers);
+    numChannels = length(channels);
+    
+    % Pre-allocate data matrix
+    data = NaN(numChannels, numTriggers, samplesPerEpoch);
+
+    % Loop through each channel
+    for chIdx = 1:numChannels
+        ch = channels(chIdx);
+        fprintf('Processing Channel %d...\n', ch);
+        
+        % Loop through each trigger
+        for trigIdx = 1:numTriggers
+            triggerTime = triggers(trigIdx);
+            
+            % Calculate sample indices
+            startSample = round((triggerTime - preTrigger) * samplingRate) + 1;
+            endSample = startSample + samplesPerEpoch - 1;
+            
+            % Ensure indices are valid
+            if startSample < 1
+                warning('Trigger %d on channel %d starts before data begins. Skipping...', trigIdx, ch);
+                continue;
+            end
+            
+            try
+                % Retrieve the specific window of data
+                [ns_RESULT, ~, epochData] = ns_GetAnalogData(hFile, ch, startSample, samplesPerEpoch);
+                
+                if ~strcmp(ns_RESULT, 'ns_OK')
+                    warning('Failed to retrieve data for Trigger %d on Channel %d: %s', trigIdx, ch, ns_RESULT);
+                    continue;
+                end
+                
+                % Store data in pre-allocated array
+                data(chIdx, trigIdx, :) = epochData';
+                
+            catch ME
+                warning('Error processing Trigger %d on Channel %d: %s', trigIdx, ch, ME.message);
+            end
+        end
+    end
+    
+    fprintf('Data import around triggers complete.\n');
+end
+
+
+function timingResults = AV40_importEyelink(dataDirectory, filename)
+    % AV40_IMPORT_EYELINK - Import and parse TIMING_RESULTS and DEVIANT_RESPONSE_RESULTS
+    %
+    % inputs:
+    % dataDirectory: Path to the main data dir containing edf subdir
+    % filename: Name of the current data file (e.g., 'pt027000029.nev')
+    %
+    % Output:
+    % timingResults: Struct containing extracted event times for specified events
+    
     %% Step 1: Locate the 'edf' Subdirectory
     edfDir = fullfile(dataDirectory, 'edf');
     if ~isfolder(edfDir)
         error('The ''edf'' subdirectory does not exist in: %s', dataDirectory);
     end
-
-    % Remove file extension from filename
+    
+    % Remove file extension
     [~, baseFilename, ~] = fileparts(filename);
     fprintf('Searching for subdirectory: %s in %s\n', baseFilename, edfDir);
 
-    %% Step 2: Search for Matching Subdirectory
-    subdirs = dir(edfDir);  % List all items in the 'edf' directory
-    isDir = [subdirs.isdir];
-    subdirs = subdirs(isDir);  % Keep only directories
-
-    % Find a subdirectory that matches the filename
+    %% Step 2: Locate Matching Subdirectory
+    subdirs = dir(edfDir);
+    subdirs = subdirs([subdirs.isdir]); % Keep only directories
     matchingSubdir = '';
+    
     for i = 1:length(subdirs)
         if strcmp(subdirs(i).name, baseFilename)
             matchingSubdir = fullfile(edfDir, subdirs(i).name);
             break;
         end
     end
-
+    
     if isempty(matchingSubdir)
         error('No subdirectory matching "%s" was found in: %s', baseFilename, edfDir);
     end
 
-    %% Step 3: Locate and Import TIMING_RESULTS
-    timingFilePath = fullfile(matchingSubdir, 'TIMING_RESULTS');
-    if ~exist(timingFilePath, 'file')
-        error('TIMING_RESULTS file not found in: %s', matchingSubdir);
+    %% Step 3: Locate TIMING_RESULTS and DEVIANT_RESPONSE_RESULTS
+    timingFilePath = fullfile(matchingSubdir, 'TIMING_RESULTS.txt');
+    deviantFilePath = fullfile(matchingSubdir, 'DEVIANT_RESPONSE_RESULTS.txt');
+    
+    if ~isfile(timingFilePath)
+        error('TIMING_RESULTS.txt not found in: %s', matchingSubdir);
+    end
+    if ~isfile(deviantFilePath)
+        warning('DEVIANT_RESPONSE_RESULTS.txt not found in: %s', matchingSubdir);
+        deviantFilePath = ''; % Allow proceeding without deviant file
     end
     
-    fprintf('Loading TIMING_RESULTS from: %s\n', timingFilePath);
-    [fid, message] = fopen(timingFilePath, 'rt');
-    if fid == -1
-        error('Error opening TIMING_RESULTS file: %s', message);
-    end
+    %% Step 4: Parse TIMING_RESULTS
+    fprintf('Parsing TIMING_RESULTS from: %s\n', timingFilePath);
+    timingResults = struct();
+    timingResults.ADDT_STANDARD = [];
+    timingResults.ADDT_DEVIANT = [];
+    timingResults.VDDT_STANDARD = [];
+    timingResults.VDDT_DEVIANT = [];
+    timingResults.VST_ONSET = [];
     
-    % Initialize storage for lines
-    timingResults.RawLines = {};
-    I = 1;
-
-    % Read file line by line
-    while ~feof(fid)
-        timingResults.RawLines{I, 1} = fgetl(fid);
-        I = I + 1;
-    end
+    fid = fopen(timingFilePath, 'rt');
+    rawLines = textscan(fid, '%s', 'Delimiter', '\n');
     fclose(fid);
+    rawLines = rawLines{1};
     
-    %% Step 4: Extract Relevant Timing Information
-    fprintf('Extracting timing information...\n');
-    timingResults.nLines = length(timingResults.RawLines);
-    timingResults.TrialStartTimes = [];
-    
-    for lineIdx = 1:timingResults.nLines
-        currentLine = strtrim(timingResults.RawLines{lineIdx});
-        
-        if contains(currentLine, 'TRIALID')
-            splitLine = strsplit(currentLine);
-            trialTime = str2double(splitLine{2});
-            if ~isnan(trialTime)
-                timingResults.TrialStartTimes(end + 1) = trialTime; %#ok<AGROW>
-            end
+    for i = 1:length(rawLines)
+        line = strtrim(rawLines{i});
+        if contains(line, 'ADDT_STANDARD_ONSET')
+            timingResults.ADDT_STANDARD(end + 1) = extract_event_time(line);
+        elseif contains(line, 'ADDT_DEVIANT_ONSET')
+            timingResults.ADDT_DEVIANT(end + 1) = extract_event_time(line);
+        elseif contains(line, 'VDDT_STANDARD_ONSET')
+            timingResults.VDDT_STANDARD(end + 1) = extract_event_time(line);
+        elseif contains(line, 'VDDT_DEVIANT_ONSET')
+            timingResults.VDDT_DEVIANT(end + 1) = extract_event_time(line);
+        elseif contains(line, 'VST_ONSET')
+            timingResults.VST_ONSET(end + 1) = extract_event_time(line);
         end
     end
     
-    %% Step 5: Summary
-    fprintf('Total lines read: %d\n', timingResults.nLines);
-    fprintf('Trial start times extracted: %d\n', length(timingResults.TrialStartTimes));
+    %% Step 5: Parse DEVIANT_RESPONSE_RESULTS (if available)
+    if ~isempty(deviantFilePath)
+        fprintf('Parsing DEVIANT_RESPONSE_RESULTS from: %s\n', deviantFilePath);
+        timingResults.DEVIANT_HIT_REWARD_JUICE_ONSET = [];
+        timingResults.FALSE_ALARM_BUTTON_RESPONSE = [];
+        timingResults.DEVIANT_MISS = [];
+        
+        fid = fopen(deviantFilePath, 'rt');
+        rawLines = textscan(fid, '%s', 'Delimiter', '\n');
+        fclose(fid);
+        rawLines = rawLines{1};
+        
+        for i = 1:length(rawLines)
+            line = strtrim(rawLines{i});
+            if contains(line, 'DEVIANT_HIT_REWARD_JUICE_ONSET')
+                timingResults.DEVIANT_HIT_REWARD_JUICE_ONSET(end + 1) = extract_event_time(line);
+            elseif contains(line, 'FALSE_ALARM_BUTTON_RESPONSE')
+                timingResults.FALSE_ALARM_BUTTON_RESPONSE(end + 1) = extract_event_time(line);
+            elseif contains(line, 'DEVIANT_MISS')
+                timingResults.DEVIANT_MISS(end + 1) = extract_event_time(line);
+            end
+        end
+    else
+        warning('Skipping DEVIANT_RESPONSE_RESULTS parsing (file missing).');
+    end
+
+    %% Step 6: Summary
+%     fprintf('TIMING_RESULTS and DEVIANT_RESPONSE_RESULTS parsed successfully.\n');
+%     disp(timingResults);
+
+
+    %% Helper Function to Extract Event Time
+    function eventTime = extract_event_time(line)
+        % Extract EVENT_TIME from a line
+        tokens = strsplit(line, '\t');
+        eventTime = NaN;
+        if length(tokens) >= 6
+            eventTime = str2double(tokens{end});
+            if isnan(eventTime)
+                warning('Failed to extract EVENT_TIME from line: %s', line);
+            end
+        end
+    end
 end
+
 
 
 function [eegLFP, eegMUA, eegCSD] = epoch_data(lfp, mua, csd, triggers, config)
@@ -293,9 +438,9 @@ function [eegLFP, eegMUA, eegCSD, triggers] = reject_artifacts(eegLFP, eegMUA, e
     triggers(outliers) = [];
 end
 
-function save_results(directory, fileName, eegLFP, eegMUA, eegCSD, analogData, triggers)
+function save_results(directory, fileName, eegLFP, eegMUA, eegCSD, analogData, triggers,eyelinkTiming)
     % Save processed data
-    save(fullfile(directory, [fileName '_processed.mat']), 'eegLFP', 'eegMUA', 'eegCSD', 'analogData', 'triggers');
+    save(fullfile(directory, [fileName '_epoched.mat']), 'eegLFP', 'eegMUA', 'eegCSD', 'triggers','eyelinkTiming');
 end
 
 function config = get_default_config()
@@ -304,10 +449,10 @@ function config = get_default_config()
     config.newadrate = 1000;          % Resampling rate
     config.filters.lfp = [0.5, 300];  % LFP filter range (Hz)
     config.filters.mua = [300, 5000]; % MUA filter range (Hz)
-    config.trigger_channel = 10241;  % Default analog trigger channel
+    config.trigger_channel = 93;  % Default analog trigger channel
     config.channels = [];             % Auto-detect raw channels
     config.trigger_method = 'analog'; % 'events' or 'analog'
-    config.trigger_threshold = 0.5;   % Threshold for analog trigger detection
+    config.trigger_threshold = 50;   % Threshold for analog trigger detection
     config.event_entity_id = 1;       % Default Event Entity ID
     config.artifact_threshold = 3;    % Z-score threshold for artifact rejection
 end
