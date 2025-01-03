@@ -11,7 +11,7 @@ clc;
     directory1  = '/Volumes/Samsung03/data/AV40/Peter/';
     directory2  = '/Volumes/Samsung03/data/AV40/Peter/imported/';
 inputDir = '/Volumes/Samsung03/data/AV40/Peter'; % Replace with your input directory
-outputDir = '/Volumes/Samsung03/data/AV40/Peter/imported'; % Replace with your output directory
+figuresDir = '/Volumes/Samsung03/data/AV40/Peter/imported'; % Replace with your output directory
 fileName = 'pt027000029.nev'; % Replace with your file name
 
 % Example configuration
@@ -27,17 +27,19 @@ config.trigger_method = 'analog'; % 'events' or 'analog'
 config.trigger_threshold = 50;   % Threshold for analog trigger detection
 config.event_entity_id = 1;       % Default Event Entity ID
 config.artifact_threshold = 3;    % Z-score threshold for artifact rejection
+config.checksync = 0; % check sync between ripple and eyelink
+config.get_deviant = 1;
 
 try
     % Call the main data import function
-    data_import_v2(inputDir, fileName, config);
+    data_import_v2(inputDir,figuresDir, fileName, config);
     fprintf('importing\n');
 catch ME
     % Handle errors 
     fprintf('An error occurred: %s\n', ME.message);
 end
 
-function data_import_v2(directory1, fileName, config)
+function data_import_v2(directory1, figuresDir,fileName, config)
     % DATA_IMPORT_V2 - Enhanced Import Script with Raw and Analog Data Handling
     %
     % Parameters:
@@ -63,13 +65,128 @@ function data_import_v2(directory1, fileName, config)
     % Handle triggers
     if strcmp(config.trigger_method, 'analog')
         triggerChannel = config.trigger_channel; % Specify analog channel for triggers
-        triggers = get_analog_triggers(hFile, triggerChannel, config.trigger_threshold);
+        [triggers_std,triggers_deviant] = get_analog_triggers(hFile, triggerChannel, config.trigger_threshold);
     else %digital triggers don't work yet, sorrrryyyyyy
         disp('no analog triggers? check analog trig chan')
-        triggers = get_event_triggers(hFile, config.event_entity_id);
+        % digital trig logic could go here
     end
 
-    % get Data
+    
+    % get the eyelink data
+    timingResults = AV40_importEyelink(directory1, fileName);
+    
+    %% check match between eyelink ripple and eyelink trigs
+
+if config.checksync ==1
+
+% Assumptions:
+% - `triggers`: Analog trigger timestamps (samples at 30 kHz)
+% - `timingResults.ADDT_STANDARD`: Timing results ADDT standard event timestamps (ms at 1 kHz)
+% - `timingResults.ADDT_DEVIANT`: Timing results ADDT deviant event timestamps (ms at 1 kHz)
+% - `fs_analog`: Sampling rate of analog triggers (e.g., 30000 Hz)
+
+% Constants
+    fs_analog = 30000; % Sampling rate of analog triggers (30 kHz)
+    fs_timing = 1000;  % Sampling rate of timingResults (1 kHz)
+
+    %% 1. Downsample Analog Triggers to 1 kHz
+    disp('Downsampling analog triggers to 1 kHz...');
+    triggers_downsampled = triggers / (fs_analog / fs_timing); % Convert to 1 kHz sample indices
+
+
+    %% 2. Combine ADDT Standards and Deviants
+    
+    combined_ADDT = sort([timingResults.ADDT_STANDARD, timingResults.ADDT_DEVIANT]);
+
+    % Ensure enough triggers and combined timestamps for comparison
+    numSamples = min([100, length(triggers_downsampled), length(combined_ADDT)]);
+    if numSamples < 100
+        warning('Fewer than 100 triggers available for comparison!');
+    end
+
+    % Select subsets for comparison
+    analog_subset = triggers_downsampled(1:numSamples);
+    timing_subset = combined_ADDT(1:numSamples);
+
+    %% 3. Align Both Trigger Sets to their First Event
+    disp('Aligning triggers relative to their first event...');
+
+    % Align relative to the first trigger
+    analog_relative = analog_subset - analog_subset(1);
+    timing_relative = timing_subset - timing_subset(1);
+
+    % Verify alignment
+    disp('First Trigger (Analog, Timing):');
+    fprintf('Analog: %.2f ms | Timing: %.2f ms\n', analog_subset(1), timing_subset(1));
+
+    %% 4. Calculate Relative Differences
+    disp('Calculating relative differences...');
+
+    % Compute differences between corresponding relative timestamps
+    relative_diff = analog_relative - timing_relative;
+
+    % Compute mean and standard deviation of relative differences
+    mean_relative_diff = mean(relative_diff);
+    std_relative_diff = std(relative_diff);
+
+    fprintf('Mean Relative Difference: %.2f ms\n', mean_relative_diff);
+    fprintf('Std Relative Difference: %.2f ms\n', std_relative_diff);
+
+    %% 5. Calculate Interstimulus Intervals (ISIs) in Relative Time
+    disp('Calculating ISIs for relative timing...');
+
+    % Calculate ISIs (relative time differences)
+    ISI_analog = diff(analog_relative);
+    ISI_timing = diff(timing_relative);
+
+    % Compute mean and std ISIs
+    ISI_stats = struct();
+    ISI_stats.analog.mean = mean(ISI_analog);
+    ISI_stats.analog.std = std(ISI_analog);
+    ISI_stats.timing.mean = mean(ISI_timing);
+    ISI_stats.timing.std = std(ISI_timing);
+
+    disp('ISI Statistics (Relative Time):');
+    disp(ISI_stats);
+
+    %% 6. Plot Results
+    disp('Plotting relative timing and ISI comparison...');
+
+    figure;
+
+    % Plot Relative Timestamps
+    subplot(2,1,1);
+    plot(analog_relative, '-o', 'DisplayName', 'Analog Triggers (Relative)');
+    hold on;
+    plot(timing_relative, '-x', 'DisplayName', 'Combined ADDT (Relative)');
+    legend('Location', 'best');
+    title('Relative Trigger Timing Comparison (Analog vs Combined ADDT)');
+    xlabel('Trigger Index');
+    ylabel('Time (ms)');
+    grid on;
+
+    % Plot Relative Differences
+    subplot(2,1,2);
+    plot(relative_diff, '-o');
+    yline(mean_relative_diff, '--r', 'Mean Diff');
+    yline(mean_relative_diff + std_relative_diff, ':r', 'Mean + Std');
+    yline(mean_relative_diff - std_relative_diff, ':r', 'Mean - Std');
+    title('Relative Trigger Time Differences (Analog vs Combined ADDT)');
+    xlabel('Trigger Index');
+    ylabel('Difference (ms)');
+    grid on;
+
+    %% 7. Display Summary
+    disp('Summary of Relative Trigger Comparison:');
+    fprintf('Mean Relative ISI (Analog): %.2f ms\n', ISI_stats.analog.mean);
+    fprintf('Mean Relative ISI (Combined ADDT): %.2f ms\n', ISI_stats.timing.mean);
+    fprintf('Mean Relative Trigger Difference: %.2f ms\n', mean_relative_diff);
+    fprintf('Std Relative Trigger Difference: %.2f ms\n', std_relative_diff);
+
+
+end
+    %%
+    % get ephys Data
     channels = config.channels;
     rawData = get_channel_data(hFile, channels);
     
@@ -89,25 +206,167 @@ function data_import_v2(directory1, fileName, config)
     newadrate = config.newadrate;
     filtere = config.filters.lfp;
     filterm = config.filters.mua;
-    fs = 30000; %assumed for ripple analog fs
+    fs = 30000; %ASSUMED for ripple analog fs
     
-    [~, cnte, cntm, cntc, ~, ~] = module_filtcont(rawData, newadrate, filtere, filterm, filtertype,fs);
+    [cnte, cntm, cntc, ~, ~] = module_filtcont(rawData, newadrate, filtere, filterm, filtertype,fs);
 
-    % Epoch Data
+    % Epoch Data to aud triggers in ripple system
     disp('epoching')
-    [eegLFP, eegMUA, eegCSD] = epoch_data(cnte, cntm, cntc, triggers, config);
-
+    triggers_std = triggers_std / (30000 / newadrate); 
+    triggers_deviant = triggers_deviant / (30000 / newadrate);
+    epoched_data = struct();
+    epoched_data.standard = [];
+    epoched_data.deviant = [];
+    [lfp_std, mua_std, csd_std] = epoch_data(cnte, cntm, cntc, triggers_std, config);
     % Reject Artifacts
-    [eegLFP, eegMUA, eegCSD, triggers] = reject_artifacts(eegLFP, eegMUA, eegCSD, triggers, config);
+    [lfp_std, mua_std, csd_std, triggers_std] = reject_artifacts(lfp_std, mua_std, csd_std, triggers_std, config);
     
-    % get the eyelink data
-    timingResults = AV40_importEyelink(directory1, fileName);
+    epoched_data.standard.lfp = lfp_std;
+    epoched_data.standard.mua = mua_std;
+    epoched_data.standard.csd = csd_std;
+    
+    if config.get_deviant == 1
+    [lfp_dev, mua_dev, csd_dev] = epoch_data(cnte, cntm, cntc, triggers_deviant, config);
+    % Reject Artifacts
+    [lfp_dev, mua_dev, csd_dev, triggers_deviant] = reject_artifacts(lfp_dev, mua_dev, csd_dev, triggers_deviant, config);
+    
+    epoched_data.deviant.lfp = lfp_dev;
+    epoched_data.deviant.mua = mua_dev;
+    epoched_data.deviant.csd = csd_dev;
+    end
+    
 
     % Save Results
-    disp('saving')
-    save_results(directory1, fileName, eegLFP, eegMUA, eegCSD, triggers,timingResults,rawData,config);
+    disp('saving data')
+    save_results(figuresDir, fileName, epoched_data, triggers_std,triggers_deviant,timingResults,config);
+    
+    %% make figs
+    disp('making figures')
+    % Define directories for saving figures
+    figuresDir = fullfile(directory2, 'figures');
+    if ~exist(figuresDir, 'dir')
+        mkdir(figuresDir);
+    end
+
+    % Plot Standard Data
+    plot_baseline_corrected_data(epoched_data.standard, config, 'standard', figuresDir, fileName);
+
+    % Plot Deviant Data (if available)
+    if isfield(epoched_data, 'deviant') && ~isempty(epoched_data.deviant)
+        plot_baseline_corrected_data(epoched_data.deviant, config, 'deviant', figuresDir, fileName);
+    end
+
+
 
     
+end
+
+function plot_baseline_corrected_data(epoched_data, config, condition, figuresDir, fileName)
+    % PLOT_BASELINE_CORRECTED_DATA - Baseline correct and visualize epoched data
+    %
+    % Parameters:
+    % epoched_data - Struct containing LFP, CSD, MUA data
+    % config       - Configuration struct with epoch and sampling settings
+    % condition    - String: 'standard' or 'deviant' for labeling
+    % figuresDir   - Directory to save figures
+    % fileName     - Base name for saving figures
+    
+    disp(['Making figures for ', condition, ' data']);
+
+    %% Baseline Correction Parameters
+    baselineStart = config.epoch_tframe(1); % Start of baseline window (ms)
+    baselineEnd = -5; % End of baseline window (ms)
+    fs = config.newadrate; % Sampling rate (Hz)
+
+    % Convert baseline window from ms to sample indices
+    baselineIdx = round((baselineStart:baselineEnd) * (fs / 1000)) - baselineStart * (fs / 1000) + 1;
+
+    %% Baseline Correction
+    % Initialize baseline-corrected arrays
+    lfp_bsl = zeros(size(epoched_data.lfp));
+    csd_bsl = zeros(size(epoched_data.csd));
+    mua_bsl = zeros(size(epoched_data.mua));
+
+    % Baseline Correction for LFP
+    for trct = 1:size(epoched_data.lfp, 2)
+        for chct = 1:size(epoched_data.lfp, 1)
+            lfp_bsl(chct, trct, :) = squeeze(epoched_data.lfp(chct, trct, :)) - ...
+                mean(squeeze(epoched_data.lfp(chct, trct, baselineIdx)), 'omitnan');
+        end
+    end
+
+    % Baseline Correction for CSD
+    for trct = 1:size(epoched_data.csd, 2)
+        for chct = 1:size(epoched_data.csd, 1)
+            csd_bsl(chct, trct, :) = squeeze(epoched_data.csd(chct, trct, :)) - ...
+                mean(squeeze(epoched_data.csd(chct, trct, baselineIdx)), 'omitnan');
+        end
+    end
+
+    % Baseline Correction for MUA
+    if ~isempty(epoched_data.mua)
+        for trct = 1:size(epoched_data.mua, 2)
+            for chct = 1:size(epoched_data.mua, 1)
+                mua_bsl(chct, trct, :) = squeeze(epoched_data.mua(chct, trct, :)) - ...
+                    mean(squeeze(epoched_data.mua(chct, trct, baselineIdx)), 'omitnan');
+            end
+        end
+    end
+
+    %% Plotting Parameters
+    timeVector = linspace(config.epoch_tframe(1), config.epoch_tframe(2), size(lfp_bsl, 3));
+    numChannels = 1:size(lfp_bsl, 1);
+
+    % Determine Color Axis for CSD
+    csd_min = min(min(squeeze(mean(csd_bsl(:, :, :), 2))));
+    csd_max = max(max(squeeze(mean(csd_bsl(:, :, :), 2))));
+    csd_caxis = [-max(abs([csd_min, csd_max])) * 0.75, max(abs([csd_min, csd_max])) * 0.75];
+
+    % Determine Color Axis for MUA (if available)
+    if ~isempty(mua_bsl)
+        mua_min = min(min(squeeze(mean(mua_bsl(:, :, :), 2))));
+        mua_max = max(max(squeeze(mean(mua_bsl(:, :, :), 2))));
+        mua_caxis = [-max(abs([mua_min, mua_max])) * 0.75, max(abs([mua_min, mua_max])) * 0.75];
+    end
+
+    %% Plot Figures
+    fig = figure('Position', [200, 200, 1200, 700]);
+
+    % Plot LFP
+    subplot(1, 3, 1);
+    imagesc(timeVector, numChannels, squeeze(mean(lfp_bsl, 2)));
+    title(['Trial Avg. LFP (', condition, ')']);
+    xlabel('Time (ms)');
+    ylabel('Channel');
+    colormap(flipud(jet));
+    colorbar;
+
+    % Plot CSD
+    subplot(1, 3, 2);
+    imagesc(timeVector, numChannels, squeeze(mean(csd_bsl, 2)));
+    title(['Trial Avg. CSD (', condition, ')']);
+    xlabel('Time (ms)');
+    ylabel('Channel');
+    colorbar;
+    caxis(csd_caxis);
+
+    % Plot MUA (if available)
+    if ~isempty(mua_bsl)
+        subplot(1, 3, 3);
+        imagesc(timeVector, numChannels, squeeze(mean(mua_bsl, 2)));
+        title(['Trial Avg. MUA (', condition, ')']);
+        xlabel('Time (ms)');
+        ylabel('Channel');
+        colorbar;
+        caxis(mua_caxis);
+    end
+
+    %% Save Figures
+    saveas(fig, fullfile(figuresDir, [fileName, '_', condition, '_avg_profiles.fig']));
+    saveas(fig, fullfile(figuresDir, [fileName, '_', condition, '_avg_profiles.jpg']));
+    close(fig);
+
+    disp(['Baseline correction and plots for ', condition, ' have been saved successfully.']);
 end
 
 function rawData = remap_channels(rawData)
@@ -170,68 +429,93 @@ end
 
 
 
-function triggers = get_analog_triggers(hFile, analogChannel, threshold)
+function [triggers_standard, triggers_deviant] = get_analog_triggers(hFile, analogChannel, threshold)
     % GET_ANALOG_TRIGGERS - Detect first pulse of each pulse train in analog data
     %
     % Parameters:
     % hFile          - Handle to the Neuroshare file
     % analogChannel  - Analog channel ID
     % threshold      - Threshold for detecting rising edges
-    % fs             - Sampling rate (Hz) of the analog data
     %
-    % Output:
-    % triggers       - Indices of the first pulse of each train
+    % Outputs:
+    % triggers_standard - Indices of the first pulse of standard trains (~5 pulses)
+    % triggers_deviant  - Indices of the first pulse of deviant trains (~10 pulses)
     
-    % Retrieve analog data
+    %% Step 1: Retrieve Analog Data
     [ns_RESULT, ~, analogData] = ns_GetAnalogData(hFile, analogChannel, 1, hFile.Entity(analogChannel).Count);
 
-    % Error handling for invalid data retrieval
     if ~strcmp(ns_RESULT, 'ns_OK')
         error('Error retrieving analog data: %s', ns_RESULT);
     end
-    
-    % Given string
+
+    % Define sampling rate
     samplingRateStr = '30 ksamp/sec';
-
-    % Check if the string matches '30 ksamp/sec'
     if strcmp(samplingRateStr, '30 ksamp/sec')
-        fs = 30000; % highest fs in ripple system
-        disp('found 30 ksamp/sec.');
+        fs = 30000; % Sampling rate
+        disp('Found 30 ksamp/sec! the bar for success is low');
     else
-        disp('maybe not 30 ksamp/sec.');
+        fs = 30000;
+        disp('check yourself before you wreck yourself. Sampling rate may differ from 30 ksamp/sec.');
     end
-    % Detect all rising edges where the signal crosses the threshold
-    allTriggers = find(diff(analogData > threshold) == 1); % Rising edge detection
-    
-    % Time difference threshold to separate trains
-    % For 40 Hz pulse trains, period = 1/40 = 0.025 sec (25 ms)
-    % For 100 Hz pulse trains, period = 1/100 = 0.01 sec (10 ms)
-    minPulseGap = 0.15 * fs; % Minimum gap in samples to consider a new pulse train
 
-    % Initialize the list of first pulses
-    triggers = [];
+    %% Step 2: Detect All Rising Edges
+    allTriggers = find(diff(analogData > threshold) == 1); % Rising edge detection
+
+    %% Step 3: Separate Pulse Trains
+    minPulseGap = 0.15 * fs; % Minimum gap to separate pulse trains
+    pulseTrainStarts = [];
+    pulseTrainEnds = [];
     lastPulse = -inf; % Track the last pulse's index
 
-    % Loop through all detected triggers and just get stim onset
+    % Identify train start and end points
     for i = 1:length(allTriggers)
         if allTriggers(i) - lastPulse > minPulseGap
-            % If enough time has passed, this is the start of a new train
-            triggers(end + 1) = allTriggers(i); %#ok<AGROW>
-            lastPulse = allTriggers(i);
+            % New train detected
+            pulseTrainStarts(end + 1) = allTriggers(i); %#ok<AGROW>
+            if i > 1
+                pulseTrainEnds(end + 1) = allTriggers(i - 1); %#ok<AGROW>
+            end
+        end
+        lastPulse = allTriggers(i);
+    end
+    % Add final train end
+    pulseTrainEnds(end + 1) = allTriggers(end);
+
+    %% Step 4: Classify Trains as Standard or Deviant
+    triggers_standard = [];
+    triggers_deviant = [];
+
+    for i = 1:length(pulseTrainStarts)
+        % Extract pulses within this train
+        startIdx = find(allTriggers >= pulseTrainStarts(i), 1, 'first');
+        endIdx = find(allTriggers <= pulseTrainEnds(i), 1, 'last');
+        trainPulses = allTriggers(startIdx:endIdx);
+
+        % Count number of pulses in the train
+        pulseCount = length(trainPulses);
+
+        if pulseCount >= 8 % Deviant trains (~10 pulses)
+            triggers_deviant(end + 1) = pulseTrainStarts(i); %#ok<AGROW>
+        elseif pulseCount >= 4 && pulseCount <= 7 % Standard trains (~5 pulses)
+            triggers_standard(end + 1) = pulseTrainStarts(i); %#ok<AGROW>
         end
     end
 
-    % Optional: Plot the signal and detected triggers
+    %% Step 5: Optional Plot for Visualization
 %     figure;
 %     plot(1:length(analogData), analogData);
 %     hold on;
-%     plot(triggers, analogData(triggers), 'ro', 'MarkerSize', 8, 'LineWidth', 2);
-%     title('Analog Signal with Detected Triggers');
+%     plot(triggers_standard, analogData(triggers_standard), 'go', 'MarkerSize', 8, 'LineWidth', 2);
+%     plot(triggers_deviant, analogData(triggers_deviant), 'ro', 'MarkerSize', 8, 'LineWidth', 2);
+%     title('Analog Signal with Detected Standard and Deviant Triggers');
 %     xlabel('Sample Index');
 %     ylabel('Analog Signal');
-%     legend('Analog Signal', 'First Pulse of Train');
+%     legend('Analog Signal', 'Standard Triggers (~5 pulses)', 'Deviant Triggers (~10 pulses)');
 %     hold off;
+% 
+%     disp(['Detected ', num2str(length(triggers_standard)), ' standard pulse trains and ', num2str(length(triggers_deviant)), ' deviant pulse trains.']);
 end
+
 
 function data = get_triggered_channel_data(hFile, channels, triggers, preTrigger, postTrigger, samplingRate)
     % GET_TRIGGERED_CHANNEL_DATA - Import channel data around trigger times
@@ -448,9 +732,9 @@ function [eegLFP, eegMUA, eegCSD, triggers] = reject_artifacts(eegLFP, eegMUA, e
     triggers(outliers) = [];
 end
 
-function save_results(directory, fileName, eegLFP, eegMUA, eegCSD, triggers,eyelinkTiming,cont_data,config)
+function save_results(directory, fileName, epoched_data, triggers_std,triggers_deviant,eyelinkTiming,config)
     % Save processed data
-    save(fullfile(directory, [fileName '_imported.mat']), 'eegLFP', 'eegMUA', 'eegCSD', 'triggers','eyelinkTiming','cont_data','config');
+    save(fullfile(directory, [fileName '_imported.mat']), 'epoched_data','triggers_std','triggers_deviant','eyelinkTiming','config');
 end
 
 function config = get_default_config()
@@ -465,4 +749,6 @@ function config = get_default_config()
     config.trigger_threshold = 50;   % Threshold for analog trigger detection
     config.event_entity_id = 1;       % Default Event Entity ID
     config.artifact_threshold = 3;    % Z-score threshold for artifact rejection
+    config.checksync = 0;
+    config.get_deviant = 0;
 end
