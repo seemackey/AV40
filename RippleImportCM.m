@@ -206,14 +206,14 @@ end
     newadrate = config.newadrate;
     filtere = config.filters.lfp;
     filterm = config.filters.mua;
-    fs = 30000; %ASSUMED for ripple analog fs
+    adrate = 30000; %ASSUMED for ripple analog fs
     
     [cnte, cntm, cntc, ~, ~] = module_filtcont(rawData, newadrate, filtere, filterm, filtertype,fs);
 
     % Epoch Data to aud triggers in ripple system
     disp('epoching')
-    triggers_std = triggers_std / (30000 / newadrate); 
-    triggers_deviant = triggers_deviant / (30000 / newadrate);
+    triggers_std = triggers_std / (adrate / newadrate); 
+    triggers_deviant = triggers_deviant / (adrate / newadrate);
     epoched_data = struct();
     epoched_data.standard = [];
     epoched_data.deviant = [];
