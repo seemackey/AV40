@@ -8,10 +8,9 @@ close all;
 clc;
 
 % Directories and file names
-    directory1  = '/Volumes/Samsung03/data/AV40/Peter/';
-    directory2  = '/Volumes/Samsung03/data/AV40/Peter/imported/';
-inputDir = '/Volumes/Samsung03/data/AV40/Peter'; % Replace with your input directory
-figuresDir = '/Volumes/Samsung03/data/AV40/Peter/imported'; % Replace with your output directory
+
+inputDir = 'H:\data\AV40\Peter'; % Replace with your input directory
+figuresDir = 'H:\data\AV40\Peter\imported'; % Replace with your output directory
 fileName = 'pt027000029.nev'; % Replace with your file name
 
 % Example configuration
@@ -208,7 +207,7 @@ end
     filterm = config.filters.mua;
     adrate = 30000; %ASSUMED for ripple analog fs
     
-    [cnte, cntm, cntc, ~, ~] = module_filtcont(rawData, newadrate, filtere, filterm, filtertype,fs);
+    [cnte, cntm, cntc, ~, ~] = module_filtcont(rawData, newadrate, filtere, filterm, filtertype,adrate);
 
     % Epoch Data to aud triggers in ripple system
     disp('epoching')
