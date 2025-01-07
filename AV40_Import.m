@@ -8,13 +8,15 @@ close all;
 clc;
 
 % Directories and file names
-inputDir = '/Volumes/Samsung03/data/AV40/Peter'; % Replace with your input directory
-figuresDir = '/Volumes/Samsung03/data/AV40/Peter/imported'; % Replace with your output directory
+
+inputDir = '/Volumes/Samsung03/data/AV40/Peter/pt027'; % Replace with your input directory
+figuresDir = '/Volumes/Samsung03/data/AV40/Peter/pt027/testing'; % Replace with your output directory
 fileName = 'pt027000029.nev'; % Replace with your file name
 
 % Example configuration
 config = struct();
 config.epoch_tframe = [-250, 250]; % Epoch window in ms
+config.ripplefs = 30000; % assumed ripple fs/adrate
 config.newadrate = 1000;          % Resampling rate
 config.filters.lfp = [0.5, 300];  % LFP filter range (Hz)
 config.filters.mua = [300, 5000]; % MUA filter range (Hz)
@@ -27,7 +29,7 @@ config.event_entity_id = 1;       % Default Event Entity ID
 config.artifact_threshold = 3;    % Z-score threshold for artifact rejection
 config.checksync = 0; % check sync between ripple and eyelink
 config.get_deviant = 1; 
-config.store_cont_data = 1;
+config.store_cont_data = 1; %takes a while, stores 1 second chunks
 
 try
     % Call the main data import function
@@ -64,13 +66,17 @@ function [epoched_data] = data_import_v2(directory1, figuresDir, fileName, confi
         error('Failed to open file: %s', ns_RESULT);
     end
     
+    %% classify channels and REMAP according to labels
+    % Separate entities into raw (data) and analog (stimuli and eye mvmt) categories
+    [rawChannels, ~] = classify_channels(hFile);
+    config.channels = rawChannels(config.channels); % selected raw chans
     %% Get Trigger Times
     triggerChannel = config.trigger_channel;
     [triggers_std, triggers_deviant] = get_analog_triggers(hFile, triggerChannel, config.trigger_threshold);
     % get the eyelink data
     EyelinkData = AV40_importEyelink(directory1, fileName);
     %% Sampling Rates and Epoch Setup
-    fs = 30000; % Ripple sampling rate (Hz)
+    fs = config.ripplefs; % Ripple sampling rate (Hz)
     newadrate = config.newadrate;
     x1 = round(config.epoch_tframe(1) * (fs / 1000));
     x2 = round(config.epoch_tframe(2) * (fs / 1000));
@@ -220,7 +226,10 @@ function [epoched_data] = data_import_v2(directory1, figuresDir, fileName, confi
     epoched_data.standard.mua = mua_std;
     epoched_data.deviant.mua = mua_dev;
     
-    save(fullfile(figuresDir, [fileName '_imported.mat']), 'epoched_data', 'triggers_std', 'triggers_deviant','EyelinkData', 'config','continuous_raw','read_me_plz');
+    save(fullfile(figuresDir, [fileName '_imported.mat']), 'epoched_data', 'triggers_std', 'triggers_deviant','EyelinkData', 'config');
+    if config.store_cont_data == 1 % This prevents overwriting an old cont with a new blank
+        save(fullfile(figuresDir, [fileName '_continuous.mat']), 'continuous_raw','read_me_plz');
+    end
     disp('Data import complete!');
 end
 
