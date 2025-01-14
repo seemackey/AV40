@@ -21,7 +21,7 @@ config.newadrate = 1000;          % Resampling rate
 config.filters.lfp = [0.5, 300];  % LFP filter range (Hz)
 config.filters.mua = [300, 5000]; % MUA filter range (Hz)
 config.trigger_channel = 93;  %  analog trigger channel for aud
-config.channels = [2:25];             % ephys data channels
+config.channels = [1:24];             % ephys data channels
 config.channel_remap = true; % Enable channel remapping by default
 config.trigger_method = 'analog'; % 'events' or 'analog'
 config.trigger_threshold = 50;   % Threshold for analog trigger detection
@@ -29,7 +29,7 @@ config.event_entity_id = 1;       % Default Event Entity ID
 config.artifact_threshold = 3;    % Z-score threshold for artifact rejection
 config.checksync = 0; % check sync between ripple and eyelink
 config.get_deviant = 1; 
-config.store_cont_data = 1; %takes a while, stores 1 second chunks
+config.store_cont_data = 0; %takes a while, stores 1 second chunks
 
 try
     % Call the main data import function
@@ -57,7 +57,7 @@ end
 %% FUNCTIONS BELOW %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 function [epoched_data] = data_import_v2(directory1, figuresDir, fileName, config)
-    % DATA_IMPORT_V2 - Trigger-based Import Script
+    % DATA_IMPORT_V2 - Trigger-based Import 
     
     %% Open File
     filePath = fullfile(directory1, fileName);
@@ -68,7 +68,7 @@ function [epoched_data] = data_import_v2(directory1, figuresDir, fileName, confi
     
     %% classify channels and REMAP according to labels
     % Separate entities into raw (data) and analog (stimuli and eye mvmt) categories
-    [rawChannels, ~] = classify_channels(hFile);
+    [rawChannels, ~] = classify_channels(hFile); % all raw chans
     config.channels = rawChannels(config.channels); % selected raw chans
     %% Get Trigger Times
     triggerChannel = config.trigger_channel;
@@ -167,6 +167,13 @@ function [epoched_data] = data_import_v2(directory1, figuresDir, fileName, confi
     lfp_dev = lfp_dev(2:end-1,:,:);
     mua_dev = mua_dev(2:end-1,:,:);
     
+    %% downsample triggers before saving
+    
+    triggers_std_ds = round(triggers_std * (config.newadrate / fs));
+    triggers_deviant_ds = round(triggers_deviant * (config.newadrate / fs));
+
+
+    
     %% Import Continuous Data in 1-Second Chunks (Downsampled to 1 kHz)
     if config.store_cont_data == 1
     disp('Importing and downsampling continuous raw data into 1-second chunks...');
@@ -226,9 +233,9 @@ function [epoched_data] = data_import_v2(directory1, figuresDir, fileName, confi
     epoched_data.standard.mua = mua_std;
     epoched_data.deviant.mua = mua_dev;
     
-    save(fullfile(figuresDir, [fileName '_imported.mat']), 'epoched_data', 'triggers_std', 'triggers_deviant','EyelinkData', 'config');
+    save(fullfile(figuresDir, [fileName '_imported.mat']), 'epoched_data','triggers_std_ds','triggers_deviant_ds','EyelinkData', 'config');
     if config.store_cont_data == 1 % This prevents overwriting an old cont with a new blank
-        save(fullfile(figuresDir, [fileName '_continuous.mat']), 'continuous_raw','read_me_plz');
+        save(fullfile(figuresDir, [fileName '_continuous.mat']), 'continuous_raw','triggers_std_ds','triggers_deviant_ds','read_me_plz');
     end
     disp('Data import complete!');
 end
@@ -268,6 +275,11 @@ function plot_baseline_corrected_data(epoched_data, config, condition, figuresDi
     baselineIdx = round((baselineStart:baselineEnd) * (fs / 1000)) - baselineStart * (fs / 1000) + 1;
 
     %% Baseline Correction
+    
+    [epoched_data.lfp, ~] = MTF_rejectartifacts(epoched_data.lfp, 'median', 3);
+    [epoched_data.csd, ~] = MTF_rejectartifacts(epoched_data.csd, 'median', 3);
+    [epoched_data.mua, ~] = MTF_rejectartifacts(epoched_data.mua, 'median', 3);
+    
     % Initialize baseline-corrected arrays
     lfp_bsl = zeros(size(epoched_data.lfp));
     csd_bsl = zeros(size(epoched_data.csd));
@@ -300,6 +312,7 @@ function plot_baseline_corrected_data(epoched_data, config, condition, figuresDi
     end
 
     %% Plotting Parameters
+
     timeVector = linspace(config.epoch_tframe(1), config.epoch_tframe(2), size(lfp_bsl, 3));
     numChannels = 1:size(lfp_bsl, 1);
 
@@ -307,6 +320,10 @@ function plot_baseline_corrected_data(epoched_data, config, condition, figuresDi
     csd_min = min(min(squeeze(mean(csd_bsl(:, :, :), 2))));
     csd_max = max(max(squeeze(mean(csd_bsl(:, :, :), 2))));
     csd_caxis = [-max(abs([csd_min, csd_max])) * 0.75, max(abs([csd_min, csd_max])) * 0.75];
+    
+    lfp_min = min(min(squeeze(mean(lfp_bsl(:, :, :), 2))));
+    lfp_max = max(max(squeeze(mean(lfp_bsl(:, :, :), 2))));
+    lfp_caxis = [-max(abs([lfp_min, lfp_max])) * 0.75, max(abs([lfp_min, lfp_max])) * 0.75];
 
     % Determine Color Axis for MUA (if available)
     if ~isempty(mua_bsl)
@@ -326,6 +343,7 @@ function plot_baseline_corrected_data(epoched_data, config, condition, figuresDi
     ylabel('Channel');
     colormap(flipud(jet));
     colorbar;
+    caxis(lfp_caxis);
 
     % Plot CSD
     subplot(1, 3, 2);
@@ -433,21 +451,47 @@ function [triggers_standard, triggers_deviant] = get_analog_triggers(hFile, anal
     if ~strcmp(ns_RESULT, 'ns_OK')
         error('Error retrieving analog data: %s', ns_RESULT);
     end
-
-    % Define sampling rate
-    [~,samplingRateStr] = hFile.FileInfo.Label;
-    if strcmp(samplingRateStr, '30 ksamp/sec')
-        fs = 30000; % Sampling rate
-        disp('Found 30 ksamp/sec! the bar for success is low');
+    
+    
+    % check sampling rate
+for check = 1:length(hFile.FileInfo)
+    if isfield(hFile.FileInfo(check), 'FileTypeID') && ...
+       isfield(hFile.FileInfo(check), 'TimeSpan') && ...
+       isfield(hFile.FileInfo(check), 'Label')
+   
+        % Display File Info
+        fprintf('File Type: %s | Time Span: %.2f  | Sampling Rate: %s\n', ...
+            hFile.FileInfo(check).FileTypeID, ...
+            hFile.FileInfo(check).TimeSpan, ...
+            hFile.FileInfo(check).Label);
+        
+        % Validate Sampling Rate if TimeSpan is valid
+        if hFile.FileInfo(check).TimeSpan > 0
+            if contains(hFile.FileInfo(check).Label, '30 ksamp/sec')
+                fprintf('Found 30 kHz samp rate! The bar for success is low.\n');
+            else
+                warning('Check yourself before you wreck yourself, samp rate may not be 30k (Found: %s).', ...
+                    hFile.FileInfo(check).Label);
+            end
+        else
+            fprintf('Skipping entry %d: TimeSpan is zero or invalid.\n', check);
+        end
     else
-        fs = 30000;
-        disp('check yourself before you wreck yourself. Sampling rate may differ from 30 ksamp/sec.');
+        warning('Incomplete metadata in FileInfo entry %d. Missing FileTypeID, TimeSpan, or Label.', check);
     end
+end
+
+
+
 
     %% Step 2: Detect All Rising Edges
     allTriggers = find(diff(analogData > threshold) == 1); % Rising edge detection
+    if length(allTriggers) < 10
+        disp('WARNING: less than 10 triggers')
+    end
 
     %% Step 3: Separate Pulse Trains
+    fs = 30000;
     minPulseGap = 0.15 * fs; % Minimum gap to separate pulse trains
     pulseTrainStarts = [];
     pulseTrainEnds = [];
@@ -692,31 +736,7 @@ end
 
 
 
-function [eegLFP, eegMUA, eegCSD] = epoch_data(lfp, mua, csd, triggers, config)
-    % Epoch data around triggers
-    numTrials = length(triggers);
-    numChannels = size(lfp, 1);
-    epochLength = diff(config.epoch_tframe) * config.newadrate / 1000;
 
-    eegLFP = zeros(numChannels, numTrials, epochLength);
-    eegMUA = zeros(numChannels, numTrials, epochLength);
-    eegCSD = zeros(numChannels, numTrials, epochLength);
-
-    for trial = 1:numTrials
-        idx = triggers(trial) + (config.epoch_tframe(1):config.epoch_tframe(2)) * config.newadrate / 1000;
-        eegLFP(:, trial, :) = lfp(:, idx);
-        eegMUA(:, trial, :) = mua(:, idx);
-        eegCSD(:, trial, :) = csd(:, idx);
-    end
-end
-
-function [eegLFP, eegMUA, eegCSD, triggers] = reject_artifacts(eegLFP, eegMUA, eegCSD, triggers, config)
-    % Remove trials with artifacts
-    [eegLFP, outliers] = MTF_rejectartifacts(eegLFP, 'median', config.artifact_threshold);
-    eegMUA(:, outliers, :) = [];
-    eegCSD(:, outliers, :) = [];
-    triggers(outliers) = [];
-end
 
 
 function config = get_default_config()
