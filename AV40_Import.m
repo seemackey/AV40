@@ -9,9 +9,9 @@ clc;
 
 % Directories and file names
 
-inputDir = '/Volumes/Samsung03/data/AV40/Peter/pt027'; % Replace with your input directory
-figuresDir = '/Volumes/Samsung03/data/AV40/Peter/pt027/testing'; % Replace with your output directory
-fileName = 'pt027000029.nev'; % Replace with your file name
+inputDir = '/Volumes/Samsung03/data/AV40/Peter/pt030'; % Replace with your input directory
+figuresDir = '/Volumes/Samsung03/data/AV40/Peter/pt030/imported'; % Replace with your output directory
+fileName = 'pt030000023.nev'; % Replace with your file name
 
 % Example configuration
 config = struct();
@@ -20,7 +20,7 @@ config.ripplefs = 30000; % assumed ripple fs/adrate
 config.newadrate = 1000;          % Resampling rate
 config.filters.lfp = [0.5, 300];  % LFP filter range (Hz)
 config.filters.mua = [300, 5000]; % MUA filter range (Hz)
-config.trigger_channel = 93;  %  analog trigger channel for aud
+config.trigger_channel = 29;  %  analog trigger channel for aud
 config.channels = [1:24];             % ephys data channels
 config.channel_remap = true; % Enable channel remapping by default
 config.trigger_method = 'analog'; % 'events' or 'analog'
@@ -29,7 +29,7 @@ config.event_entity_id = 1;       % Default Event Entity ID
 config.artifact_threshold = 3;    % Z-score threshold for artifact rejection
 config.checksync = 0; % check sync between ripple and eyelink
 config.get_deviant = 1; 
-config.store_cont_data = 0; %takes a while, stores 1 second chunks
+config.store_cont_data = 1; %takes a while, stores 1 second chunks
 
 try
     % Call the main data import function
@@ -68,10 +68,11 @@ function [epoched_data] = data_import_v2(directory1, figuresDir, fileName, confi
     
     %% classify channels and REMAP according to labels
     % Separate entities into raw (data) and analog (stimuli and eye mvmt) categories
-    [rawChannels, ~] = classify_channels(hFile); % all raw chans
+    [rawChannels, analogChannels] = classify_channels(hFile); % raw and ana chans
+    
     config.channels = rawChannels(config.channels); % selected raw chans
     %% Get Trigger Times
-    triggerChannel = config.trigger_channel;
+    triggerChannel = analogChannels(config.trigger_channel);
     [triggers_std, triggers_deviant] = get_analog_triggers(hFile, triggerChannel, config.trigger_threshold);
     % get the eyelink data
     EyelinkData = AV40_importEyelink(directory1, fileName);
@@ -261,18 +262,29 @@ function plot_baseline_corrected_data(epoched_data, config, condition, figuresDi
     
     disp(['Making figures for ', condition, ' data']);
 
-    %% Baseline Correction Parameters
-    if config.epoch_tframe(1) < -50
-       baselineStart = -50; % Start of baseline window (ms)
-       baselineEnd = -5; % End of baseline window (ms)
-    else
-        baselineStart = config.epoch_tframe(1); % Start of baseline window (ms)
-        baselineEnd = -5; % End of baseline window (ms)
+    % Define baseline correction period
+    baselineStart = -50;  % Start of baseline window (ms)
+    baselineEnd = -5;     % End of baseline window (ms)
+
+    % Ensure baseline period is within the epoch timeframe
+    if baselineStart < config.epoch_tframe(1)
+        warning('Baseline start is outside the epoch range. Using start of epoch.');
+        baselineStart = config.epoch_tframe(1);
     end
+    if baselineEnd > config.epoch_tframe(2)
+        warning('Baseline end is outside the epoch range. Using end of epoch.');
+        baselineEnd = config.epoch_tframe(2);
+    end
+
+    % Convert baseline window to sample indices
+    epochTimeframe = config.epoch_tframe(1):config.epoch_tframe(2); % Full epoch time vector
     fs = config.newadrate; % Sampling rate (Hz)
 
-    % Convert baseline window from ms to sample indices
-    baselineIdx = round((baselineStart:baselineEnd) * (fs / 1000)) - baselineStart * (fs / 1000) + 1;
+    % Find sample indices corresponding to baseline range
+    [~, baselineStartIdx] = min(abs(epochTimeframe - baselineStart));
+    [~, baselineEndIdx] = min(abs(epochTimeframe - baselineEnd));
+
+    baselineIdx = baselineStartIdx:baselineEndIdx; % Correct baseline indices
 
     %% Baseline Correction
     
@@ -615,12 +627,12 @@ end
 function timingResults = AV40_importEyelink(dataDirectory, filename)
     % AV40_IMPORT_EYELINK - Import and parse TIMING_RESULTS and DEVIANT_RESPONSE_RESULTS
     %
-    % inputs:
-    % dataDirectory: Path to the main data dir containing edf subdir
-    % filename: Name of the current data file (e.g., 'pt027000029.nev')
+    % Inputs:
+    %   dataDirectory: Path to the main data dir containing edf subdir
+    %   filename: Name of the current data file (e.g., 'pt027000029.nev')
     %
     % Output:
-    % timingResults: Struct containing extracted event times for specified events
+    %   timingResults: Struct containing extracted event times for specified events
     
     %% Step 1: Locate the 'edf' Subdirectory
     edfDir = fullfile(dataDirectory, 'edf');
@@ -673,19 +685,28 @@ function timingResults = AV40_importEyelink(dataDirectory, filename)
     rawLines = textscan(fid, '%s', 'Delimiter', '\n');
     fclose(fid);
     rawLines = rawLines{1};
-    
-    for i = 1:length(rawLines)
+
+    % Extract headers
+    headers = strsplit(rawLines{1}, '\t');
+    eventTimeIdx = find(strcmp(headers, 'EVENT_TIME'));
+
+    if isempty(eventTimeIdx)
+        warning('EVENT_TIME column not found in TIMING_RESULTS.txt');
+    end
+
+    % Process data lines
+    for i = 2:length(rawLines)  % Start from second line (skip headers)
         line = strtrim(rawLines{i});
         if contains(line, 'ADDT_STANDARD_ONSET')
-            timingResults.ADDT_STANDARD(end + 1) = extract_event_time(line);
+            timingResults.ADDT_STANDARD(end + 1) = extract_event_time(line, eventTimeIdx);
         elseif contains(line, 'ADDT_DEVIANT_ONSET')
-            timingResults.ADDT_DEVIANT(end + 1) = extract_event_time(line);
+            timingResults.ADDT_DEVIANT(end + 1) = extract_event_time(line, eventTimeIdx);
         elseif contains(line, 'VDDT_STANDARD_ONSET')
-            timingResults.VDDT_STANDARD(end + 1) = extract_event_time(line);
+            timingResults.VDDT_STANDARD(end + 1) = extract_event_time(line, eventTimeIdx);
         elseif contains(line, 'VDDT_DEVIANT_ONSET')
-            timingResults.VDDT_DEVIANT(end + 1) = extract_event_time(line);
+            timingResults.VDDT_DEVIANT(end + 1) = extract_event_time(line, eventTimeIdx);
         elseif contains(line, 'VST_ONSET')
-            timingResults.VST_ONSET(end + 1) = extract_event_time(line);
+            timingResults.VST_ONSET(end + 1) = extract_event_time(line, eventTimeIdx);
         end
     end
     
@@ -700,39 +721,52 @@ function timingResults = AV40_importEyelink(dataDirectory, filename)
         rawLines = textscan(fid, '%s', 'Delimiter', '\n');
         fclose(fid);
         rawLines = rawLines{1};
-        
-        for i = 1:length(rawLines)
+
+        % Extract headers
+        headers = strsplit(rawLines{1}, '\t');
+        eventTimeIdx = find(strcmp(headers, 'EVENT_TIME'));
+
+        if isempty(eventTimeIdx)
+            warning('EVENT_TIME column not found in DEVIANT_RESPONSE_RESULTS.txt');
+        end
+
+        % Process data lines
+        for i = 2:length(rawLines)
             line = strtrim(rawLines{i});
             if contains(line, 'DEVIANT_HIT_REWARD_JUICE_ONSET')
-                timingResults.DEVIANT_HIT_REWARD_JUICE_ONSET(end + 1) = extract_event_time(line);
+                timingResults.DEVIANT_HIT_REWARD_JUICE_ONSET(end + 1) = extract_event_time(line, eventTimeIdx);
             elseif contains(line, 'FALSE_ALARM_BUTTON_RESPONSE')
-                timingResults.FALSE_ALARM_BUTTON_RESPONSE(end + 1) = extract_event_time(line);
+                timingResults.FALSE_ALARM_BUTTON_RESPONSE(end + 1) = extract_event_time(line, eventTimeIdx);
             elseif contains(line, 'DEVIANT_MISS')
-                timingResults.DEVIANT_MISS(end + 1) = extract_event_time(line);
+                timingResults.DEVIANT_MISS(end + 1) = extract_event_time(line, eventTimeIdx);
             end
         end
     else
         warning('Skipping DEVIANT_RESPONSE_RESULTS parsing (file missing).');
     end
 
-    %% Step 6: Summary
-%     fprintf('TIMING_RESULTS and DEVIANT_RESPONSE_RESULTS parsed successfully.\n');
-%     disp(timingResults);
-
-
     %% Helper Function to Extract Event Time
-    function eventTime = extract_event_time(line)
-        % Extract EVENT_TIME from a line
+    function eventTime = extract_event_time(line, eventTimeIdx)
+        % Extract EVENT_TIME using the correct column index
         tokens = strsplit(line, '\t');
         eventTime = NaN;
-        if length(tokens) >= 6
-            eventTime = str2double(tokens{end});
+
+        if isempty(eventTimeIdx)
+            warning('EVENT_TIME column not detected, returning NaN.');
+            return;
+        end
+        
+        if length(tokens) >= eventTimeIdx
+            eventTime = str2double(tokens{eventTimeIdx});
             if isnan(eventTime)
-                warning('Failed to extract EVENT_TIME from line: %s', line);
+                warning('Failed to extract valid EVENT_TIME from line: %s', line);
             end
+        else
+            warning('EVENT_TIME column index exceeds available columns in line: %s', line);
         end
     end
 end
+
 
 
 
