@@ -5,7 +5,7 @@
 clear; close all; clc;
 
 %% Configuration Section
-pathName = '/Volumes/Samsung03/data/AV40/Peter/pt030/imported/';
+pathName = '/Users/chase/Desktop/NKI/data/AV40/peter/pt030/imported/';
 fileName = 'pt030000016.nev_imported.mat'; % Eyelink file
 
 % Event type selection (options: 'ADDT', 'VDDT', 'VST')
@@ -13,18 +13,22 @@ eventType = 'ADDT';
 
 % Sliding window configuration (in seconds)
 windowSize = 240; 
-stepSize = 5;
-minEventsThreshold = 5; 
+stepSize = 10;
+minEventsThreshold = 3; 
 
 % Eyelink sampling rate
 eyelinkFs = 1000; 
 
 % Wavelet parameters
 fs = 1000; % Sampling rate
-freqRange = [1, 100]; % Broad frequency range
+freqRange = [0.5, 24]; % Broad frequency range
 alphaBand = [8, 14]; % Alpha amplitude
-deltaFreq = 1.6; % Delta for ITC
+deltaFreq = [1.5,1.7]; % Delta for ITC
 preStimulusWindow = -300:-100; % Pre-stimulus period in ms
+
+% use CSD or bip LFP? (boolean)
+csd = 0;
+selchan = 14;
 
 %% Load Eyelink Data
 disp('Loading EyelinkData...');
@@ -78,7 +82,8 @@ else
 end
 
 startTime = min(combinedTimes);
-endTime = max(combinedTimes);
+%endTime = max(combinedTimes);
+endTime = combinedTimes(307);
 windowEdges = startTime:stepSize:(endTime - windowSize);
 
 % Initialize arrays for hit rate, false alarm rate, d-prime, alpha amplitude, delta ITC
@@ -100,9 +105,6 @@ alphaAmp = NaN(numChannels, length(windowEdges));
 deltaITC = NaN(numChannels, length(windowEdges));
 chunkStartTimes = (0:numChunks-1); % 1s chunks starting at 0s, 1s, 2s...
 
-%% Use `matfile` for Efficient Saving
-resultsFile = fullfile(pathName, sprintf('%s_PerfAndAlphaDeltaOverTime.mat', fileName));
-m = matfile(resultsFile, 'Writable', true);
 
 %% Perform Sliding Window Analysis
 disp('Performing sliding window analysis...');
@@ -139,14 +141,28 @@ for i = 1:length(windowEdges)
     for j = 1:length(chunkIdx)
         stitchedData = [stitchedData, squeeze(continuousData(:, chunkIdx(j), :))];
     end
-
+    
+    for ch = 1:numChannels
+        [stitchedDataFilt(ch,:), ~] = AV40_filt(stitchedData(ch,:), 1000, [0.5 300], [300 400], 1000);
+    end
+    
+    % Derivationo of local signal (e.g. CSD)
+        if ~csd==0
+            stitchedDataFiltDeriv = -diff(stitchedData,2,1); %Current Source Density
+        else
+            stitchedDataFiltDeriv = diff(stitchedData,1,1);%Bipolar Field Potential
+        end
+    % update based on derivation
+    numChannelsDeriv = size(stitchedDataFiltDeriv, 1); % Number of channels
     % **Compute Wavelet Transform on Full Window**
     waveletAmp = cell(1, numChannels);
     waveletPhase = cell(1, numChannels);
     
-    for ch = 1:numChannels
-        [ampFull, phaseFull] = wvlt_bndlm_fxn(stitchedData(ch, :), fs, freqRange, alphaBand);
-        [~, phaseDeltaFull] = wvlt_bndlm_fxn(stitchedData(ch, :), fs, freqRange, [deltaFreq, deltaFreq]);
+    for ch = 1:numChannelsDeriv
+
+        
+        [ampFull, phaseFull] = wvlt_bndlm_fxn(stitchedDataFiltDeriv(ch, :), fs, freqRange, alphaBand);
+        [~, phaseDeltaFull] = wvlt_bndlm_fxn(stitchedDataFiltDeriv(ch, :), fs, freqRange, deltaFreq);
 
         waveletAmp{ch} = ampFull;
         waveletPhase{ch} = phaseDeltaFull;
@@ -154,46 +170,143 @@ for i = 1:length(windowEdges)
 
     % **Extract Pre-Stimulus Data from Wavelet Output**
     % Compute pre-stimulus indices for all standard stimuli
-    preStimIdx = round(preStimulusWindow * (fs / 1000)) + (round(windowStandards * fs) - round(windowStart * fs))';
+    % Compute pre-stimulus indices for all standard stimuli%% Compute Pre-Stimulus Indices for Alpha Amplitude (Full Window)
+    preStimIdxFull = bsxfun(@plus, ...
+        round(preStimulusWindow * (fs / 1000)), ... % Convert entire pre-stimulus window to sample indices
+        round(windowStandards * fs) - round(windowStart * fs)); % Align with window standards
 
-    % Flatten the index array
-    preStimIdx = preStimIdx(:);
+    % Flatten and remove out-of-bounds indices
+    preStimIdxFull = preStimIdxFull(:);
+    preStimIdxFull = preStimIdxFull(preStimIdxFull > 0 & preStimIdxFull <= length(stitchedDataFiltDeriv));
+
+    % Compute Pre-Stimulus Index for Delta ITC (Single Midpoint)
+    preStimMidpointIdx = round(median(preStimulusWindow) * (fs / 1000)); % Convert midpoint to sample index
+    preStimIdxMid = round(windowStandards * fs) - round(windowStart * fs) + preStimMidpointIdx;
 
     % Remove out-of-bounds indices
-    preStimIdx = preStimIdx(preStimIdx > 0 & preStimIdx <= length(stitchedData));
+    preStimIdxMid = preStimIdxMid(preStimIdxMid > 0 & preStimIdxMid <= length(stitchedDataFiltDeriv));
 
-    if isempty(preStimIdx)
+    % Skip iteration if no valid pre-stimulus indices
+    if isempty(preStimIdxFull) || isempty(preStimIdxMid)
         continue;
     end
 
-    for ch = 1:numChannels
-        preStimAlphaAmp = waveletAmp{ch}(preStimIdx);
-        preStimDeltaPhase = waveletPhase{ch}(preStimIdx);
-
-        % **Compute Mean Alpha Amplitude**
+    %% extract Alpha Amplitude and compute Delta ITC
+    for ch = 1:numChannelsDeriv
+        % **Alpha Amplitude (Mean Over Full Pre-Stim Window)**
+        preStimAlphaAmp = waveletAmp{ch}(preStimIdxFull);
         alphaAmp(ch, i) = mean(preStimAlphaAmp);
+        alphaStd(ch, i) = std(preStimAlphaAmp);
 
-        % **Compute Delta ITC**
-        deltaITC(ch, i) = abs(mean(exp(1i * preStimDeltaPhase)));
+        % **Delta ITC (Single Time Point at Midpoint)**
+        preStimDeltaPhase = waveletPhase{ch}(preStimIdxMid);
+        deltaITC(ch, i) = abs(mean(exp(1i * preStimDeltaPhase))); % Compute ITC at single midpoint
     end
 
-    % Save incrementally
-    m.alphaAmp = alphaAmp;
-    m.deltaITC = deltaITC;
-    m.windowEdges = windowEdges;
-    m.hitRate = hitRate;
-    m.falseAlarmRate = falseAlarmRate;
-    m.dprime = dprime;
+
+
 end
 
 
+% Organize results into a structured format
+results.alphaAmp = alphaAmp;  % Mean prestimulus alpha amplitude
+results.alphaStd = alphaStd;
+results.deltaITC = deltaITC;  % Inter-trial coherence (ITC) of prestim delta phase
+results.windowEdges = windowEdges; % Time points for analysis
+results.hitRate = hitRate;  % Behavioral hit rate
+results.falseAlarmRate = falseAlarmRate; % False alarm rate
+results.dprime = dprime; % d-prime sensitivity metric
+results.eventType = eventType; % Condition (ADDT, VDDT, VST)
 
+% Include wavelet analysis parameters
+results.fs = fs;  % Sampling rate
+results.freqRange = freqRange; % Broad wavelet frequency range
+results.alphaBand = alphaBand; % Frequency range for alpha amplitude
+results.deltaFreq = deltaFreq; % Frequency range for delta ITC
+results.preStimulusWindow = preStimulusWindow; % Pre-stimulus time window in ms
 
-%% Save Results
-bandLabels = strjoin(arrayfun(@(b) sprintf('%d-%dHz', targetBands{b}(1), targetBands{b}(2)), 1:numBands, 'UniformOutput', false), '_');
-resultsFile = fullfile(pathName, sprintf('%s_PerfAnd%sOverTime.mat', fileName, bandLabels));
+% Create a filename that includes the analyzed frequency bands
+bandLabels = sprintf('Alpha%d-%dHz_Delta%.1f-%.1fHz', alphaBand(1), alphaBand(2), deltaFreq(1), deltaFreq(2));
 
-save(resultsFile, 'windowEdges', 'hitRate', 'falseAlarmRate', 'dprime', ...
-     'waveletAmplitudes', 'waveletPhases', 'windowSize', 'stepSize', 'eventType', 'targetBands');
+resultsFile = fullfile(pathName, sprintf('%s_PerfAnd%sOverTimeSelected.mat', fileName, bandLabels));
+
+% Save the struct
+save(resultsFile, 'results');
 
 disp(['Results saved to ', resultsFile]);
+
+%% Plot behavior, alpha amp, and delta ITC
+
+disp('Plotting results...');
+figure;
+
+% **1. Hit Rate**
+subplot(5,1,1);
+plot(windowEdges, hitRate, '-o', 'LineWidth', 2);
+title('Hit Rate Over Time');
+xlabel('Time (s)');
+ylabel('Hit Rate');
+ylim([0 1]);
+grid on;
+
+% **2. False Alarm Rate**
+subplot(5,1,2);
+plot(windowEdges, falseAlarmRate, '-o', 'LineWidth', 2);
+title('False Alarm Rate Over Time');
+xlabel('Time (s)');
+ylabel('False Alarm Rate');
+ylim([0 1]);
+grid on;
+
+% **3. d-prime Sensitivity**
+subplot(5,1,3);
+plot(windowEdges, dprime, '-o', 'LineWidth', 2, 'Color', 'k');
+title('d'' (Sensitivity) Over Time');
+xlabel('Time (s)');
+ylabel('d'' Value');
+grid on;
+
+% **4. Alpha Amplitude (Prestimulus)**
+subplot(5,1,4);
+plot(windowEdges, alphaAmp(selchan,:), '-o', 'LineWidth', 2, 'Color', 'b');
+title('Prestimulus Alpha Amplitude');
+xlabel('Time (s)');
+ylabel('Alpha Power');
+grid on;
+
+% **5. Delta ITC (Prestimulus)**
+subplot(5,1,5);
+plot(windowEdges, deltaITC(selchan,:), '-o', 'LineWidth', 2, 'Color', 'r');
+title('Prestimulus Delta ITC');
+xlabel('Time (s)');
+ylabel('Inter-Trial Coherence');
+ylim([0 1]); % ITC is bounded between 0 and 1
+grid on;
+
+% Adjust figure layout
+sgtitle(sprintf('Behavioral and Neural Measures Over Time (%s)', eventType));
+set(gcf, 'Position', [100, 100, 900, 800]); % Resize figure
+
+figure;
+
+% 1?? Scatter plot: d' vs. Alpha Amplitude
+subplot(1,2,1);
+scatter(alphaAmp(selchan,:), dprime(:), 'b', 'filled'); % Blue dots
+hold on;
+lsline; % Add least-squares regression line
+xlabel('Alpha Amplitude');
+ylabel('d'' (Sensitivity)');
+title('d'' vs. Alpha Amplitude');
+grid on;
+
+
+% 2?? Scatter plot: d' vs. Delta ITC
+subplot(1,2,2);
+scatter(deltaITC(selchan,:), dprime(:), 'r', 'filled'); % Red dots
+hold on;
+lsline; % Add least-squares regression line
+xlabel('Delta ITC');
+ylabel('d'' (Sensitivity)');
+title('d'' vs. Delta ITC');
+grid on;
+
