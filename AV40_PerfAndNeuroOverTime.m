@@ -5,22 +5,22 @@
 clear; close all; clc;
 
 %% Configuration Section
-pathName = '/Users/chase/Desktop/NKI/data/AV40/peter/pt030/imported/';
-fileName = 'pt030000016.nev_imported.mat'; % Eyelink file
+pathName = '/Users/chase/Desktop/NKI/data/AV40/peter/pt031032/imported/';
+fileName = 'pt031032018.nev_imported.mat'; % Eyelink file
 
 % Event type selection (options: 'ADDT', 'VDDT', 'VST')
 eventType = 'ADDT';
 
 % Sliding window configuration (in seconds)
-windowSize = 240; 
+windowSize = 120; 
 stepSize = 10;
-minEventsThreshold = 3; 
+minEventsThreshold = 1; 
 
 % Eyelink sampling rate
 eyelinkFs = 1000; 
 
 % Wavelet parameters
-fs = 1000; % Sampling rate
+fs = 1000; % Sampling rate for alignment to ephys AND for wavelet
 freqRange = [0.5, 24]; % Broad frequency range
 alphaBand = [8, 14]; % Alpha amplitude
 deltaFreq = [1.5,1.7]; % Delta for ITC
@@ -28,7 +28,9 @@ preStimulusWindow = -300:-100; % Pre-stimulus period in ms
 
 % use CSD or bip LFP? (boolean)
 csd = 0;
-selchan = 14;
+selchan = 6;
+
+selchansforcorrelation = 2:22; % Spearman Corr figure
 
 %% Load Eyelink Data
 disp('Loading EyelinkData...');
@@ -43,6 +45,11 @@ if ~isempty(missingFields)
     error('Missing required fields: %s', strjoin(missingFields, ', '));
 end
 
+%% Load Continuous Data File
+contFileName = strrep(fileName, 'imported.mat', 'continuous.mat');
+disp(['Loading continuous data from ', contFileName, '...']);
+load(fullfile(pathName, contFileName));
+continuousData = continuous_raw;
 %% Convert Event Times to Seconds
 disp('Converting Eyelink event times to seconds...');
 ADDT_STANDARD = EyelinkData.ADDT_STANDARD / eyelinkFs;
@@ -53,6 +60,24 @@ VST_ONSET = EyelinkData.VST_ONSET / eyelinkFs;
 
 buttonPressTimes = unique(EyelinkData.FALSE_ALARM_BUTTON_RESPONSE / eyelinkFs);
 hitTimes = unique(EyelinkData.DEVIANT_HIT_REWARD_JUICE_ONSET / eyelinkFs);
+
+disp('Adjusting time alignment...');
+firstEyelinkStandard = min(ADDT_STANDARD);
+firstNeuralStandard = min(triggers_std_ds) / fs; % Convert to seconds
+
+% Compute time offset between datasets
+timeOffset = firstNeuralStandard - firstEyelinkStandard;
+fprintf('Time Offset Between Neural and Eyelink Data: %.3f sec\n', timeOffset);
+
+% Adjust Eyelink timestamps
+ADDT_STANDARD = ADDT_STANDARD + timeOffset;
+ADDT_DEVIANT = ADDT_DEVIANT + timeOffset;
+VDDT_STANDARD = VDDT_STANDARD + timeOffset;
+VDDT_DEVIANT = VDDT_DEVIANT + timeOffset;
+VST_ONSET = VST_ONSET + timeOffset;
+
+buttonPressTimes = buttonPressTimes + timeOffset;
+hitTimes = hitTimes + timeOffset;
 
 %% Select Event Type
 disp('Selecting event type...');
@@ -82,9 +107,16 @@ else
 end
 
 startTime = min(combinedTimes);
-%endTime = max(combinedTimes);
-endTime = combinedTimes(307);
+endTime = max(combinedTimes);
+%endTime = combinedTimes(307);
+
+
 windowEdges = startTime:stepSize:(endTime - windowSize);
+
+% This can happen if the window is too big or file is too small 
+if isempty(windowEdges)
+    disp('not enough data for window size')
+end
 
 % Initialize arrays for hit rate, false alarm rate, d-prime, alpha amplitude, delta ITC
 hitRate = NaN(size(windowEdges));
@@ -92,12 +124,8 @@ falseAlarmRate = NaN(size(windowEdges));
 dprime = NaN(size(windowEdges));
 
 
-%% Load Continuous Data File
-contFileName = strrep(fileName, 'imported.mat', 'continuous.mat');
-disp(['Loading continuous data from ', contFileName, '...']);
-load(fullfile(pathName, contFileName), 'continuous_raw');
-continuousData = continuous_raw;
 
+%% preallocate arrays for neural analysis
 numChannels = size(continuousData, 1); % Number of channels
 numChunks = size(continuousData, 2); % 1-second chunks
 chunkLength = size(continuousData, 3); % 1000 timepoints per chunk
@@ -121,13 +149,23 @@ for i = 1:length(windowEdges)
 
     % Skip calculation if insufficient events
     if length(windowStandards) < minEventsThreshold || length(windowDeviants) < minEventsThreshold
-        continue;
-    end
+        hitRate(i) = NaN;
+        dprime(i) = NaN;
+        falseAlarmRate(i) = NaN;
+        
+    else
     
     % Calculate rates
     hitRate(i) = length(windowHits) / length(windowDeviants);
     falseAlarmRate(i) = length(windowButtonPresses) / length(windowStandards);
+    % Adjust extreme values to avoid infinite z-scores with dprime
+    if hitRate(i) == 1, hitRate(i) = 0.99; end
+    if hitRate(i) == 0, hitRate(i) = 0.01; end
+    if falseAlarmRate(i) == 1, falseAlarmRate(i) = 0.99; end
+    if falseAlarmRate(i) == 0, falseAlarmRate(i) = 0.01; end
+    
     dprime(i) = norminv(hitRate(i)) - norminv(falseAlarmRate(i));
+    end
 
     % Find 1s chunks in the window
     chunkIdx = find(chunkStartTimes >= windowStart & chunkStartTimes < windowEnd);
@@ -225,10 +263,13 @@ results.alphaBand = alphaBand; % Frequency range for alpha amplitude
 results.deltaFreq = deltaFreq; % Frequency range for delta ITC
 results.preStimulusWindow = preStimulusWindow; % Pre-stimulus time window in ms
 
-% Create a filename that includes the analyzed frequency bands
-bandLabels = sprintf('Alpha%d-%dHz_Delta%.1f-%.1fHz', alphaBand(1), alphaBand(2), deltaFreq(1), deltaFreq(2));
 
-resultsFile = fullfile(pathName, sprintf('%s_PerfAnd%sOverTimeSelected.mat', fileName, bandLabels));
+% 
+% Create a filename that includes event type, analyzed frequency bands, and window size
+bandLabels = sprintf('%s_Alpha%d-%dHz_Delta%.1f-%.1fHz_Window%d', ...
+    eventType, alphaBand(1), alphaBand(2), deltaFreq(1), deltaFreq(2), windowSize);
+
+resultsFile = fullfile(pathName, sprintf('%s_PerfAnd%sOverTime.mat', fileName, bandLabels));
 
 % Save the struct
 save(resultsFile, 'results');
@@ -280,7 +321,6 @@ plot(windowEdges, deltaITC(selchan,:), '-o', 'LineWidth', 2, 'Color', 'r');
 title('Prestimulus Delta ITC');
 xlabel('Time (s)');
 ylabel('Inter-Trial Coherence');
-ylim([0 1]); % ITC is bounded between 0 and 1
 grid on;
 
 % Adjust figure layout
@@ -289,9 +329,9 @@ set(gcf, 'Position', [100, 100, 900, 800]); % Resize figure
 
 figure;
 
-% 1?? Scatter plot: d' vs. Alpha Amplitude
+% Scatter plot: d' vs. Alpha Amplitude
 subplot(1,2,1);
-scatter(alphaAmp(selchan,:), dprime(:), 'b', 'filled'); % Blue dots
+scatter(alphaAmp(selchan,:), dprime, 'b', 'filled'); % 
 hold on;
 lsline; % Add least-squares regression line
 xlabel('Alpha Amplitude');
@@ -300,9 +340,9 @@ title('d'' vs. Alpha Amplitude');
 grid on;
 
 
-% 2?? Scatter plot: d' vs. Delta ITC
+% Scatter plot: d' vs. Delta ITC
 subplot(1,2,2);
-scatter(deltaITC(selchan,:), dprime(:), 'r', 'filled'); % Red dots
+scatter(deltaITC(selchan,:), dprime, 'r', 'filled'); % 
 hold on;
 lsline; % Add least-squares regression line
 xlabel('Delta ITC');
@@ -310,3 +350,6 @@ ylabel('d'' (Sensitivity)');
 title('d'' vs. Delta ITC');
 grid on;
 
+%% Across channel correlations
+
+AV40_PlotLaminarCorr(results,selchansforcorrelation)
