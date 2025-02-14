@@ -1,6 +1,6 @@
-% import ephys from the ripple system
+% import ephys from the ripple system and eyelink data from txt files 
 % chase m 2024
-
+% epochs to digital triggers and eyelink data, feb '25
 
 % Clear workspace and initialize
 clear;
@@ -9,27 +9,28 @@ clc;
 
 % Directories and file names
 
-inputDir = '/Volumes/Samsung03/data/AV40/Peter/pt030'; % Replace with your input directory
-figuresDir = '/Volumes/Samsung03/data/AV40/Peter/pt030/imported'; % Replace with your output directory
-fileName = 'pt030000023.nev'; % Replace with your file name
+inputDir = '/Volumes/Samsung03/data/AV40/Peter/pt027/'; % Replace with your input directory
+figuresDir = '/Volumes/Samsung03/data/AV40/Peter/pt027/imported/Vis'; % Replace with your output directory
+fileName = 'pt027000031.nev'; % Replace with your file name
 
 % Example configuration
 config = struct();
-config.epoch_tframe = [-250, 250]; % Epoch window in ms
+config.epoch_tframe = [-50, 150]; % Epoch window in ms
 config.ripplefs = 30000; % assumed ripple fs/adrate
+config.eyelinkfs = 1000; %assumed eyelink FS
 config.newadrate = 1000;          % Resampling rate
 config.filters.lfp = [0.5, 300];  % LFP filter range (Hz)
 config.filters.mua = [300, 5000]; % MUA filter range (Hz)
-config.trigger_channel = 29;  %  analog trigger channel for aud
+config.trigger_channel = 29;  %  analog trigger channel for aud, beware
 config.channels = [1:24];             % ephys data channels
 config.channel_remap = true; % Enable channel remapping by default
-config.trigger_method = 'analog'; % 'events' or 'analog'
+config.trigger_method = 'VDDT'; % 'digital', 'analog', 'VDDT', 'VST' *always use analog for aud epoching
 config.trigger_threshold = 50;   % Threshold for analog trigger detection
 config.event_entity_id = 1;       % Default Event Entity ID
 config.artifact_threshold = 3;    % Z-score threshold for artifact rejection
 config.checksync = 0; % check sync between ripple and eyelink
 config.get_deviant = 1; 
-config.store_cont_data = 1; %takes a while, stores 1 second chunks
+config.store_cont_data = 1; %takes a while, stores 1s chunks@newadrate
 
 try
     % Call the main data import function
@@ -45,7 +46,7 @@ try
     plot_baseline_corrected_data(epoched_data.standard, config, 'standard', figuresDir, fileName);
 
     % Plot deviant
-    if isfield(epoched_data, 'deviant') && ~isempty(epoched_data.deviant)
+    if config.get_deviant == 1
         plot_baseline_corrected_data(epoched_data.deviant, config, 'deviant', figuresDir, fileName);
     end
     
@@ -68,60 +69,195 @@ function [epoched_data] = data_import_v2(directory1, figuresDir, fileName, confi
     
     %% classify channels and REMAP according to labels
     % Separate entities into raw (data) and analog (stimuli and eye mvmt) categories
-    [rawChannels, analogChannels] = classify_channels(hFile); % raw and ana chans
+    [rawChannels, analogChannels, digitalChannels] = classify_channels(hFile); % raw and ana chans
     
     config.channels = rawChannels(config.channels); % selected raw chans
     %% Get Trigger Times
-    triggerChannel = analogChannels(config.trigger_channel);
-    [triggers_std, triggers_deviant] = get_analog_triggers(hFile, triggerChannel, config.trigger_threshold);
-    % get the eyelink data
-    EyelinkData = AV40_importEyelink(directory1, fileName);
-    %% Sampling Rates and Epoch Setup
-    fs = config.ripplefs; % Ripple sampling rate (Hz)
-    newadrate = config.newadrate;
-    x1 = round(config.epoch_tframe(1) * (fs / 1000));
-    x2 = round(config.epoch_tframe(2) * (fs / 1000));
-    epochLength = abs(x1) + abs(x2) + 1; % 30 khz epochs for retrieval
     
-    %% Pre-allocate Matrices
+    if contains(config.trigger_method,'analog') % recorded audio
+ 
+        triggerChannel = analogChannels(config.trigger_channel);
+        [triggers_std, triggers_deviant] = get_analog_triggers(hFile, triggerChannel, config.trigger_threshold);
+
+        % Ensure column vectors
+        triggers_std = triggers_std(:);
+        triggers_deviant = triggers_deviant(:);
+
+        % Get Eyelink data
+        EyelinkData = AV40_importEyelink(directory1, fileName);
+
+
+     elseif contains(config.trigger_method,'digital') % recorded TTLs
+        triggers_std = [];
+
+        numEvents = hFile.Entity(config.event_entity_id).Count;
+
+        % Loop through all events
+        for eventIdx = 1:numEvents
+            [~, timestamp, TTL_data, ~] = ns_GetEventData(hFile, config.event_entity_id, eventIdx);
+
+            % Only keep TTL ON events (TTL high values)
+            if TTL_data > 0  % Ensures we capture any TTL pulse (not just 32767)
+                triggers_std = [triggers_std; timestamp]; % Store TTL ON timestamp
+            end
+        end
+
+        % Ensure column vector and convert to sample indices (30 kHz)
+        triggers_std = round(triggers_std(:) * config.ripplefs);
+
+        triggers_deviant = NaN; % No deviants for now
+
+       
+    elseif contains(config.trigger_method,'ADDT')
+    
+    
+        %% Eyelink-Based Triggering (unreliable for Aud signals)
+        % only use as redundant backup for analog triggering
+        EyelinkData = AV40_importEyelink(directory1, fileName); % Eyelink txt
+        triggerChannel = analogChannels(config.trigger_channel);
+        [triggers_std_analog, ~] = get_analog_triggers(hFile, triggerChannel, config.trigger_threshold); % Recorded audio
+
+        %Convert Eyelink & Neural Data to Samples 
+        firstEyelinkStandard_sample = min(EyelinkData.ADDT_STANDARD); % Already in 1 kHz samples
+        firstNeuralStandard_sample = round(min(triggers_std_analog) * (config.eyelinkfs / config.ripplefs)); % Convert to 1 kHz sample space
+
+        %Compute Time Offset in **Samples**
+        timeOffset_samples = firstNeuralStandard_sample - firstEyelinkStandard_sample; % Offset in 1 kHz sample space
+        fprintf('Time Offset (Samples @1kHz): %d samples\n', timeOffset_samples);
+
+        %Apply Offset to Eyelink Data in Sample Space
+        triggers_std_samples = EyelinkData.ADDT_STANDARD + timeOffset_samples;
+        triggers_deviant_samples = EyelinkData.ADDT_DEVIANT + timeOffset_samples;
+
+        %Convert to Neural Sample Space (30 kHz)
+        triggers_std = round(triggers_std_samples * (config.ripplefs / config.eyelinkfs));
+        triggers_deviant = round(triggers_deviant_samples * (config.ripplefs / config.eyelinkfs));
+
+         % Handle empty deviant triggers
+        if isempty(triggers_deviant)
+            triggers_deviant = [];
+        end
+        
+    elseif contains(config.trigger_method,'VDDT')
+    
+        EyelinkData = AV40_importEyelink(directory1, fileName); % Eyelink txt
+        triggerChannel = analogChannels(config.trigger_channel);
+        [triggers_std_analog, ~] = get_analog_triggers(hFile, triggerChannel, config.trigger_threshold); % Recorded audio
+
+        %Convert Eyelink & Neural Data to Samples First
+        firstEyelinkStandard_sample = min(EyelinkData.ADDT_STANDARD); % Already in 1 kHz samples
+        firstNeuralStandard_sample = round(min(triggers_std_analog) * (config.eyelinkfs / config.ripplefs)); % Convert to 1 kHz sample space
+
+        %Compute Time Offset in **Samples**
+        timeOffset_samples = firstNeuralStandard_sample - firstEyelinkStandard_sample; % Offset in 1 kHz sample space
+        fprintf('Time Offset (Samples @1kHz): %d samples\n', timeOffset_samples);
+
+        %Apply Offset to Eyelink Data in Sample Space
+        triggers_std_samples = EyelinkData.VDDT_STANDARD + timeOffset_samples;
+        triggers_deviant_samples = EyelinkData.VDDT_DEVIANT + timeOffset_samples;
+
+        %Convert to Neural Sample Space (30 kHz)
+        triggers_std = round(triggers_std_samples * (config.ripplefs / config.eyelinkfs));
+        triggers_deviant = round(triggers_deviant_samples * (config.ripplefs / config.eyelinkfs));
+
+
+        % Handle empty deviant triggers
+        if isempty(triggers_deviant)
+            triggers_deviant = [];
+        end
+
+    elseif contains(config.trigger_method,'VST')
+
+                EyelinkData = AV40_importEyelink(directory1, fileName); % Eyelink txt
+        triggerChannel = analogChannels(config.trigger_channel);
+        [triggers_std_analog, ~] = get_analog_triggers(hFile, triggerChannel, config.trigger_threshold); % Recorded audio
+
+        %Convert Eyelink & Neural Data to Samples 
+        firstEyelinkStandard_sample = min(EyelinkData.ADDT_STANDARD); % Already in 1 kHz samples
+        firstNeuralStandard_sample = round(min(triggers_std_analog) * (config.eyelinkfs / config.ripplefs)); % Convert to 1 kHz sample space
+
+        %Compute Time Offset in **Samples**
+        timeOffset_samples = firstNeuralStandard_sample - firstEyelinkStandard_sample; % Offset in 1 kHz sample space
+        fprintf('Time Offset (Samples @1kHz): %d samples\n', timeOffset_samples);
+
+        %Apply Offset to Eyelink Data in Sample Space
+        triggers_std_samples = EyelinkData.ADDT_STANDARD + timeOffset_samples;
+        %triggers_deviant_samples = EyelinkData.ADDT_DEVIANT + timeOffset_samples;
+
+        %Convert to Neural Sample Space (30 kHz)
+        triggers_std = round(triggers_std_samples * (config.ripplefs / config.eyelinkfs));
+        %triggers_deviant = round(triggers_deviant_samples * (config.ripplefs / config.eyelinkfs));
+                % Handle empty deviant triggers
+        % std and dev are simultaneous in VS condition
+            triggers_deviant = [];
+    else
+        disp('good grief. check how you set trigger method in config')
+    end
+
+        
+    
+
+    %% Sampling Rates and Epoch Setup
+    fs = config.ripplefs; % Ripple sampling rate (30 kHz for Ripple system)
+    newadrate = config.newadrate; % Target downsampling rate (e.g., 1 kHz)
+
+    % **Convert epoch window from milliseconds to samples (30 kHz)**
+    x1 = round(config.epoch_tframe(1) * (fs / 1000)); % Convert to 30 kHz samples
+    x2 = round(config.epoch_tframe(2) * (fs / 1000)); % Convert to 30 kHz samples
+
+    % **Ensure all triggers are valid and in 30 kHz sample space**
+    triggers_std = triggers_std(~isnan(triggers_std)); % Remove NaNs
+    triggers_deviant = triggers_deviant(~isnan(triggers_deviant)); % Remove NaNs
+
+    % **Compute Epoch Lengths**
+    epochLength_orig = abs(x1) + abs(x2) + 1; % Epoch length at **30 kHz**
+    epochLength_ds = round(epochLength_orig * (newadrate / fs)); % Downsampled epoch length (e.g., 1 kHz)
+
+    %% **Pre-allocate Epoch Matrices**
     numChannels = length(config.channels);
     numStdTriggers = length(triggers_std);
     numDevTriggers = length(triggers_deviant);
-    % Original epoch length (samples at 30 kHz)
-    epochLength_orig = abs(x1) + abs(x2) + 1; 
 
-    % Downsampled epoch length (samples at 1 kHz)
-    epochLength_ds = round(epochLength_orig * (config.newadrate / fs)); 
-
-    
-    % Epoch matrices need to account for the trigger sample (+1)
+    % Initialize  and add a space (+1) for the trigger
     lfp_std = NaN(numChannels, numStdTriggers, epochLength_ds+1);
     mua_std = NaN(numChannels, numStdTriggers, epochLength_ds+1);
     lfp_dev = NaN(numChannels, numDevTriggers, epochLength_ds+1);
     mua_dev = NaN(numChannels, numDevTriggers, epochLength_ds+1);
-    
-    %% Epoch Data for Standards
+
+    %% Epoch Data for standards
     disp('Importing triggered data for standards...');
     for chIdx = 1:numChannels
-        ch = config.channels(chIdx);
+        ch = config.channels(chIdx); % Select correct channel
+
         for tIdx = 1:numStdTriggers
             trigger = triggers_std(tIdx);
-            startIndex = trigger + x1;
-            endIndex = trigger + x2;
 
-            if startIndex < 1 || endIndex > hFile.Entity(ch).Count
-                warning('Invalid indices for trigger %d on channel %d. Skipping...', tIdx, ch);
+            % **Compute Start/End Indices in 30 kHz**
+            startIndex = max(trigger + x1, 1); % Ensure index is not negative
+            endIndex = min(trigger + x2, hFile.Entity(ch).Count); % Prevent exceeding data range
+
+            % **Prevent Out-of-Bounds Errors**
+            if startIndex >= endIndex
+                warning('Trigger %d on channel %d is out of bounds. Skipping...', tIdx, ch);
                 continue;
             end
 
-            [ns_RESULT, ~, epochData] = ns_GetAnalogData(hFile, ch, startIndex, epochLength);
-            if strcmp(ns_RESULT, 'ns_OK') && numel(epochData) == epochLength
+            % **Retrieve Analog Data from File**
+            [ns_RESULT, ~, epochData] = ns_GetAnalogData(hFile, ch, startIndex, endIndex - startIndex + 1);
+
+            if strcmp(ns_RESULT, 'ns_OK') && numel(epochData) == (endIndex - startIndex + 1)
+                % **Filter and Downsample**
                 [lfp, mua] = AV40_filt(epochData, newadrate, config.filters.lfp, config.filters.mua, fs);
-                lfp_std(chIdx, tIdx, :) = lfp;
-                mua_std(chIdx, tIdx, :) = mua;
+
+                % **Store Filtered Epoch**
+                lfp_std(chIdx, tIdx, :) = squeeze(lfp);
+                mua_std(chIdx, tIdx, :) = squeeze(mua);
             end
         end
     end
+
+
+
 
     %% Remap Channels (if enabled)
     
@@ -137,26 +273,40 @@ function [epoched_data] = data_import_v2(directory1, figuresDir, fileName, confi
     
     %% Epoch Data for Deviants
     disp('Importing triggered data for deviants...');
-    for chIdx = 1:numChannels
-        ch = config.channels(chIdx);
-        for tIdx = 1:numDevTriggers
-            trigger = triggers_deviant(tIdx);
-            startIndex = trigger + x1;
-            endIndex = trigger + x2;
 
-            if startIndex < 1 || endIndex > hFile.Entity(ch).Count
-                warning('Invalid indices for trigger %d on channel %d. Skipping...', tIdx, ch);
-                continue;
-            end
+for chIdx = 1:numChannels
+    ch = config.channels(chIdx);
 
-            [ns_RESULT, ~, epochData] = ns_GetAnalogData(hFile, ch, startIndex, epochLength);
-            if strcmp(ns_RESULT, 'ns_OK') && numel(epochData) == epochLength
-                [lfp, mua] = AV40_filt(epochData, newadrate, config.filters.lfp, config.filters.mua, fs);
-                lfp_dev(chIdx, tIdx, :) = lfp;
-                mua_dev(chIdx, tIdx, :) = mua;
-            end
+    for tIdx = 1:numDevTriggers
+        trigger = triggers_deviant(tIdx);
+
+        % **Compute Start/End Indices in 30 kHz**
+        startIndex = max(round(trigger) + x1, 1); % Prevent negative indices
+        endIndex = min(round(trigger) + x2, hFile.Entity(ch).Count); % Prevent exceeding data range
+
+        % **Validate Start and End Indices**
+        if startIndex >= endIndex
+            warning('Trigger %d on channel %d is out of bounds. Skipping...', tIdx, ch);
+            continue;
+        end
+
+        % **Retrieve Analog Data from File**
+        epochLength_actual = endIndex - startIndex + 1; % Ensure correct length
+        [ns_RESULT, ~, epochData] = ns_GetAnalogData(hFile, ch, startIndex, epochLength_actual);
+
+        if strcmp(ns_RESULT, 'ns_OK') && numel(epochData) == epochLength_actual
+            % **Filter and Downsample**
+            [lfp, mua] = AV40_filt(epochData, newadrate, config.filters.lfp, config.filters.mua, fs);
+
+            % **Store Filtered Epoch**
+            lfp_dev(chIdx, tIdx, :) = lfp;
+            mua_dev(chIdx, tIdx, :) = mua;
+        else
+            warning('Epoching failed for trigger %d on channel %d. Data mismatch.', tIdx, ch);
         end
     end
+end
+
     
     %% Remap and Compute CSD for Deviants
     if config.channel_remap
@@ -233,11 +383,30 @@ function [epoched_data] = data_import_v2(directory1, figuresDir, fileName, confi
     epoched_data.deviant.csd = csd_dev;
     epoched_data.standard.mua = mua_std;
     epoched_data.deviant.mua = mua_dev;
+
+    % Construct base filename without extensions
+    fileBaseName = sprintf('%s_%s', fileName, config.trigger_method);
+
+    % Ensure EyelinkData exists before saving imported file
+    importedFilePath = fullfile(figuresDir, [fileBaseName '_imported.mat']);
     
-    save(fullfile(figuresDir, [fileName '_imported.mat']), 'epoched_data','triggers_std_ds','triggers_deviant_ds','EyelinkData', 'config');
-    if config.store_cont_data == 1 % This prevents overwriting an old cont with a new blank
-        save(fullfile(figuresDir, [fileName '_continuous.mat']), 'continuous_raw','triggers_std_ds','triggers_deviant_ds','read_me_plz');
+    
+
+    if exist('EyelinkData', 'var')
+        save(importedFilePath, 'epoched_data', 'triggers_std_ds', 'triggers_deviant_ds', 'EyelinkData','triggers_std_analog', 'config');
+    else
+        warning('EyelinkData not found. Saving without EyelinkData...');
+        save(importedFilePath, 'epoched_data', 'triggers_std_ds', 'triggers_deviant_ds','triggers_std_analog', 'config');
     end
+
+    % Ensure continuous file has the exact same base name, only replacing "_imported" with "_continuous"
+    continuousFileBase = strrep(importedFilePath, '_imported.mat', '_continuous.mat');
+
+    % Save continuous data only if store_cont_data flag is set
+    if config.store_cont_data == 1 
+        save(continuousFileBase, 'continuous_raw', 'triggers_std_ds', 'triggers_deviant_ds','triggers_std_analog', 'read_me_plz');
+    end
+
     disp('Data import complete!');
 end
 
@@ -378,8 +547,8 @@ function plot_baseline_corrected_data(epoched_data, config, condition, figuresDi
     end
 
     %% Save Figures
-    saveas(fig, fullfile(figuresDir, [fileName, '_', condition, '_avg_profiles.fig']));
-    saveas(fig, fullfile(figuresDir, [fileName, '_', condition, '_avg_profiles.jpg']));
+    saveas(fig, fullfile(figuresDir, [fileName, '_',config.trigger_method, condition, '_avg_profiles.fig']));
+    saveas(fig, fullfile(figuresDir, [fileName, '_',config.trigger_method, condition, '_avg_profiles.jpg']));
     close(fig);
 
     disp(['Baseline correction and plots for ', condition, ' have been saved successfully.']);
@@ -408,11 +577,12 @@ function rawData = remap_channels(rawData)
 end
 
 
-function [rawChannels, analogChannels] = classify_channels(hFile)
+function [rawChannels, analogChannels, digitalChannels] = classify_channels(hFile)
     % Classify channels as raw or analog based on labels
     rawChannels = [];
     analogChannels = [];
     numEntities = length(hFile.Entity);
+    digitalChannels = [];
 
     for i = 1:numEntities
         label = hFile.Entity(i).Label;
@@ -420,6 +590,8 @@ function [rawChannels, analogChannels] = classify_channels(hFile)
             rawChannels(end + 1) = i;
         elseif contains(label, 'analog', 'IgnoreCase', true)
             analogChannels(end + 1) = i;
+        elseif contains(hFile.Entity(i).EntityType, 'Event', 'IgnoreCase', true)
+            digitalChannels(end + 1) = i;
         end
     end
 end
