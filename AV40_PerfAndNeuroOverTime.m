@@ -1,36 +1,44 @@
-%% Eyelink Timing & Wavelet Analysis Script
-% Chase M, 2025
+%% Sliding window behavior and oscillations
+% chase m 2025
 
 % Clear workspace
 clear; close all; clc;
 
 %% Configuration Section
-pathName = '/Users/chase/Desktop/NKI/data/AV40/peter/pt031032/imported/';
-fileName = 'pt031032018.nev_imported.mat'; % Eyelink file
 
-% Event type selection (options: 'ADDT', 'VDDT', 'VST')
+pathName = '/Volumes/Samsung03/data/AV40/Peter/pt033/imported/Vis/';
+fileName = 'pt033000018_VDDT_imported.mat'; % Eyelink file
+% Event type selection (options: 'ADDT', 'VDDT', 'VST'), VST under ...
+% construction!
 eventType = 'ADDT';
 
 % Sliding window configuration (in seconds)
-windowSize = 120; 
-stepSize = 10;
+windowSize = 90; 
+stepSize = 5;
 minEventsThreshold = 1; 
 
 % Eyelink sampling rate
 eyelinkFs = 1000; 
+rippleFs = 30000; % assumed Fs of the analog trigs for alignment
 
 % Wavelet parameters
 fs = 1000; % Sampling rate for alignment to ephys AND for wavelet
 freqRange = [0.5, 24]; % Broad frequency range
 alphaBand = [8, 14]; % Alpha amplitude
-deltaFreq = [1.5,1.7]; % Delta for ITC
+
+if contains(eventType,'ADDT')
+    deltaFreq = [1,1.3]; % Delta for ITC
+else
+    deltaFreq = [1.5,1.8];
+end
+
 preStimulusWindow = -300:-100; % Pre-stimulus period in ms
 
 % use CSD or bip LFP? (boolean)
 csd = 0;
 selchan = 6;
 
-selchansforcorrelation = 2:22; % Spearman Corr figure
+selchansforcorrelation = 1:15; % Spearman Corr figure
 
 %% Load Eyelink Data
 disp('Loading EyelinkData...');
@@ -47,6 +55,7 @@ end
 
 %% Load Continuous Data File
 contFileName = strrep(fileName, 'imported.mat', 'continuous.mat');
+%contFileName = 'pt033000018.nev_continuous.mat';
 disp(['Loading continuous data from ', contFileName, '...']);
 load(fullfile(pathName, contFileName));
 continuousData = continuous_raw;
@@ -62,15 +71,15 @@ buttonPressTimes = unique(EyelinkData.FALSE_ALARM_BUTTON_RESPONSE / eyelinkFs);
 hitTimes = unique(EyelinkData.DEVIANT_HIT_REWARD_JUICE_ONSET / eyelinkFs);
 
 disp('Adjusting time alignment...');
-firstEyelinkStandard = min(ADDT_STANDARD);
-firstNeuralStandard = min(triggers_std_ds) / fs; % Convert to seconds
+firstEyelinkStandard = min(ADDT_STANDARD); % auditory was always used to sync
+firstNeuralStandard = min(triggers_std_analog)/rippleFs; % Convert to seconds
 
 % Compute time offset between datasets
 timeOffset = firstNeuralStandard - firstEyelinkStandard;
 fprintf('Time Offset Between Neural and Eyelink Data: %.3f sec\n', timeOffset);
 
 % Adjust Eyelink timestamps
-ADDT_STANDARD = ADDT_STANDARD + timeOffset;
+ADDT_STANDARD = triggers_std_analog/rippleFs;
 ADDT_DEVIANT = ADDT_DEVIANT + timeOffset;
 VDDT_STANDARD = VDDT_STANDARD + timeOffset;
 VDDT_DEVIANT = VDDT_DEVIANT + timeOffset;
@@ -265,11 +274,14 @@ results.preStimulusWindow = preStimulusWindow; % Pre-stimulus time window in ms
 
 
 % 
-% Create a filename that includes event type, analyzed frequency bands, and window size
+% Remove .nev and .mat extensions from filename
+fileBaseName = regexprep(fileName, '\.nev|\.mat', '');
+
+% Create a filename that includes event type, frequency bands, and window size
 bandLabels = sprintf('%s_Alpha%d-%dHz_Delta%.1f-%.1fHz_Window%d', ...
     eventType, alphaBand(1), alphaBand(2), deltaFreq(1), deltaFreq(2), windowSize);
 
-resultsFile = fullfile(pathName, sprintf('%s_PerfAnd%sOverTime.mat', fileName, bandLabels));
+resultsFile = fullfile(pathName, sprintf('%s_%sOverTime.mat', fileBaseName, bandLabels));
 
 % Save the struct
 save(resultsFile, 'results');
@@ -279,7 +291,7 @@ disp(['Results saved to ', resultsFile]);
 %% Plot behavior, alpha amp, and delta ITC
 
 disp('Plotting results...');
-figure;
+fig1 = figure;
 
 % **1. Hit Rate**
 subplot(5,1,1);
@@ -327,7 +339,7 @@ grid on;
 sgtitle(sprintf('Behavioral and Neural Measures Over Time (%s)', eventType));
 set(gcf, 'Position', [100, 100, 900, 800]); % Resize figure
 
-figure;
+fig2 = figure;
 
 % Scatter plot: d' vs. Alpha Amplitude
 subplot(1,2,1);
@@ -338,7 +350,7 @@ xlabel('Alpha Amplitude');
 ylabel('d'' (Sensitivity)');
 title('d'' vs. Alpha Amplitude');
 grid on;
-
+axis square
 
 % Scatter plot: d' vs. Delta ITC
 subplot(1,2,2);
@@ -349,7 +361,24 @@ xlabel('Delta ITC');
 ylabel('d'' (Sensitivity)');
 title('d'' vs. Delta ITC');
 grid on;
+axis square
 
-%% Across channel correlations
 
-AV40_PlotLaminarCorr(results,selchansforcorrelation)
+
+% Across channel correlations
+
+AV40_PlotLaminarCorr(results,selchansforcorrelation);
+fig3 = gcf;
+% save figures
+% Extract directory from resultsFile
+
+[resultsDir, baseFileName, ~] = fileparts(resultsFile);
+
+% Save figure with specific filename
+performanceFigFile = fullfile(resultsDir, sprintf('%s_PerfOverTime.jpg', baseFileName));
+
+saveas(fig1, performanceFigFile);
+scatters = fullfile(resultsDir, sprintf('%s_Scatter.jpg', baseFileName));
+saveas(fig2,scatters);
+acrosschanfig = fullfile(resultsDir, sprintf('%s_AcrossChan.jpg', baseFileName));
+saveas(fig3,acrosschanfig);
