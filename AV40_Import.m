@@ -9,19 +9,19 @@ clc;
 
 % Directories and file names
 
-inputDir = '/Volumes/Samsung03/data/AV40/Peter/pt027/'; % Replace with your input directory
-figuresDir = '/Volumes/Samsung03/data/AV40/Peter/pt027/imported/Vis'; % Replace with your output directory
-fileName = 'pt027000031.nev'; % Replace with your file name
+inputDir = '/Volumes/Samsung03/Peter/pt033/'; % Replace with your input directory
+figuresDir = '/Volumes/Samsung03/data/AV40/Peter/pt033/imported/Vis/'; % Replace with your output directory
+fileName = 'pt033000018.nev'; % Replace with your file name
 
 % Example configuration
 config = struct();
-config.epoch_tframe = [-50, 150]; % Epoch window in ms
+config.epoch_tframe = [-50, 250]; % Epoch window in ms
 config.ripplefs = 30000; % assumed ripple fs/adrate
 config.eyelinkfs = 1000; %assumed eyelink FS
 config.newadrate = 1000;          % Resampling rate
 config.filters.lfp = [0.5, 300];  % LFP filter range (Hz)
 config.filters.mua = [300, 5000]; % MUA filter range (Hz)
-config.trigger_channel = 29;  %  analog trigger channel for aud, beware
+config.trigger_channel = 29;  %  analog trigger channel for aud is hardcoded for now, sorry dear reader
 config.channels = [1:24];             % ephys data channels
 config.channel_remap = true; % Enable channel remapping by default
 config.trigger_method = 'VDDT'; % 'digital', 'analog', 'VDDT', 'VST' *always use analog for aud epoching
@@ -78,7 +78,7 @@ function [epoched_data] = data_import_v2(directory1, figuresDir, fileName, confi
  
         triggerChannel = analogChannels(config.trigger_channel);
         [triggers_std, triggers_deviant] = get_analog_triggers(hFile, triggerChannel, config.trigger_threshold);
-
+        triggers_std_analog = triggers_std;
         % Ensure column vectors
         triggers_std = triggers_std(:);
         triggers_deviant = triggers_deviant(:);
@@ -89,7 +89,7 @@ function [epoched_data] = data_import_v2(directory1, figuresDir, fileName, confi
 
      elseif contains(config.trigger_method,'digital') % recorded TTLs
         triggers_std = [];
-
+        
         numEvents = hFile.Entity(config.event_entity_id).Count;
 
         % Loop through all events
@@ -104,7 +104,7 @@ function [epoched_data] = data_import_v2(directory1, figuresDir, fileName, confi
 
         % Ensure column vector and convert to sample indices (30 kHz)
         triggers_std = round(triggers_std(:) * config.ripplefs);
-
+        triggers_std_analog = [];
         triggers_deviant = NaN; % No deviants for now
 
        
@@ -385,8 +385,8 @@ end
     epoched_data.deviant.mua = mua_dev;
 
     % Construct base filename without extensions
-    fileBaseName = sprintf('%s_%s', fileName, config.trigger_method);
-
+    fileBaseNameExt = sprintf('%s_%s', fileName, config.trigger_method);
+    fileBaseName = regexprep(fileBaseNameExt, '\.nev|\.mat', '');
     % Ensure EyelinkData exists before saving imported file
     importedFilePath = fullfile(figuresDir, [fileBaseName '_imported.mat']);
     
