@@ -9,28 +9,39 @@ clc;
 
 % Directories and file names
 
-inputDir = '/Volumes/Samsung03/Peter/pt033/'; % Replace with your input directory
-figuresDir = '/Volumes/Samsung03/data/AV40/Peter/pt033/imported/Vis/'; % Replace with your output directory
-fileName = 'pt033000018.nev'; % Replace with your file name
+inputDir = '/Volumes/Samsung03/data/AV40/Peter/pt038039/'; % Replace with your input directory
+figuresDir = '/Volumes/Samsung03/data/AV40/Peter/pt038039/imported/AudPad/'; % Replace with your output directory
+fileName = 'pt038039018.nev'; % Replace with your file name
+% inputDir = '/Volumes/Samsung03/data/AM/'; % Replace with your input directory
+% figuresDir = '/Volumes/Samsung03/data/AM/'; % Replace with your output directory
+% fileName = 'ke036037037.nev'; % Replace with your file name
+
+
+
+%/Volumes/Samsung03/data/AM/ke036037037.nev
+
 
 % Example configuration
 config = struct();
-config.epoch_tframe = [-50, 250]; % Epoch window in ms
+config.epoch_tframe = [-30, 250]; % Epoch window in ms
 config.ripplefs = 30000; % assumed ripple fs/adrate
 config.eyelinkfs = 1000; %assumed eyelink FS
 config.newadrate = 1000;          % Resampling rate
 config.filters.lfp = [0.5, 300];  % LFP filter range (Hz)
 config.filters.mua = [300, 5000]; % MUA filter range (Hz)
+config.derivative = 1; % CSD is second deriv, bipLFP is 1st deriv
 config.trigger_channel = 29;  %  analog trigger channel for aud is hardcoded for now, sorry dear reader
-config.channels = [1:24];             % ephys data channels
-config.channel_remap = true; % Enable channel remapping by default
-config.trigger_method = 'VDDT'; % 'digital', 'analog', 'VDDT', 'VST' *always use analog for aud epoching
+config.channels = [33:56];             % ephys data channels 1:24 or 33:56
+config.channel_remap = true; % Enable ripple channel remapping 
+config.trigger_method = 'analog'; % 'digital', 'analog', 'VDDT', 'VST' *always use analog for aud epoching*
 config.trigger_threshold = 50;   % Threshold for analog trigger detection
 config.event_entity_id = 1;       % Default Event Entity ID
 config.artifact_threshold = 3;    % Z-score threshold for artifact rejection
 config.checksync = 0; % check sync between ripple and eyelink
 config.get_deviant = 1; 
-config.store_cont_data = 1; %takes a while, stores 1s chunks@newadrate
+config.event_sorting_method = [];%'ev2_column'; % a string that picks 'oldtono' or an ev2 column; requires digital trigger method
+config.selectedVariable = [];%'Modulation_Freq'; % variable in event file to epoch to;requires digital trigger method
+config.store_cont_data = 0; %takes a while, stores 1s chunks@newadrate
 
 try
     % Call the main data import function
@@ -88,25 +99,84 @@ function [epoched_data] = data_import_v2(directory1, figuresDir, fileName, confi
 
 
      elseif contains(config.trigger_method,'digital') % recorded TTLs
+        if isempty(config.event_sorting_method)
+        % --- Digital TTL Trigger Extraction ---
         triggers_std = [];
-        
+        all_TTLs = [];
+        all_timestamps = [];
+
         numEvents = hFile.Entity(config.event_entity_id).Count;
 
-        % Loop through all events
+        % Extract all timestamps and TTL values
         for eventIdx = 1:numEvents
             [~, timestamp, TTL_data, ~] = ns_GetEventData(hFile, config.event_entity_id, eventIdx);
-
-            % Only keep TTL ON events (TTL high values)
-            if TTL_data > 0  % Ensures we capture any TTL pulse (not just 32767)
-                triggers_std = [triggers_std; timestamp]; % Store TTL ON timestamp
-            end
+            all_timestamps = [all_timestamps; timestamp];
+            all_TTLs = [all_TTLs; TTL_data];
         end
 
-        % Ensure column vector and convert to sample indices (30 kHz)
-        triggers_std = round(triggers_std(:) * config.ripplefs);
-        triggers_std_analog = [];
-        triggers_deviant = NaN; % No deviants for now
+        % Define TTL "high" values (adjust threshold as needed)
+        isHigh = all_TTLs >= 100;  % Catch only pulses (e.g., 32767)
 
+        % Detect rising edges 
+        risingEdges = [false; isHigh(2:end) & ~isHigh(1:end-1)];
+
+        % Extract timestamps at rising edges only
+        triggers_std = all_timestamps(risingEdges);
+
+        % Convert to Ripple sample rate (30 kHz)
+        triggers_std = round(triggers_std(:) * config.ripplefs);
+
+        triggers_std_analog = [];
+        triggers_deviant = [];
+
+        % handle new and old event file types here
+        baseName = erase(fileName, '.nev'); % clean filename
+        datDir = dir(fullfile(directory1, '*@v*.mat')); % DAT files (old tono method)
+        ev2Dir = dir(fullfile(directory1, '*.ev2')); % EV2 files
+        ev2Dir = ev2Dir(~startsWith({ev2Dir.name}, '._')); % remove this crap if on a mac
+        
+        else
+            if contains(config.event_sorting_method, 'oldtono')
+                % -- Method: oldtono (e.g., DAT file with @v) --
+                datFileMatch = contains({datDir.name}, baseName);
+                if ~any(datFileMatch)
+                    error('No matching DAT file (@v) found for file %s', baseName);
+                end
+                datFile = load(fullfile(datDir(datFileMatch).folder, datDir(datFileMatch).name));
+
+                % Assume first column contains event IDs
+                toneIDs = datFile.stim(:, 1); % adjust fieldname if needed
+
+                if length(toneIDs) ~= length(triggers_std)
+                    error('Mismatch: toneIDs (%d) ? triggers (%d)', length(toneIDs), length(triggers_std));
+                end
+
+                triggers_deviant = NaN; % not applicable
+                trigger_metadata.labels = toneIDs;
+
+            elseif contains(config.event_sorting_method, 'ev2_column')
+                % Find the ev2 in our current directory
+                ev2Match = contains({ev2Dir.name}, baseName);
+                if ~any(ev2Match)
+                    error('No matching EV2 file found for file %s', baseName);
+                end
+                ev2FilePath = fullfile(ev2Dir(ev2Match).folder, ev2Dir(ev2Match).name);
+
+                % get out the whole event file, or just a selected column
+                [~,selectedColumn] = ev2LoadAndParse(ev2FilePath,config.selectedVariable);
+
+                % Extract condition labels for triggers
+                trigType = selectedColumn;
+
+                % Ensure number of trials matches number of triggers
+                if length(conditionVals) ~= length(triggers_std)
+                    error('Mismatch: EV2 trials (%d) ? triggers (%d)', length(trigType), length(triggers_std));
+                end
+
+                triggers_deviant = NaN;
+            end
+        end
+        
        
     elseif contains(config.trigger_method,'ADDT')
     
@@ -210,8 +280,9 @@ function [epoched_data] = data_import_v2(directory1, figuresDir, fileName, confi
     triggers_deviant = triggers_deviant(~isnan(triggers_deviant)); % Remove NaNs
 
     % **Compute Epoch Lengths**
-    epochLength_orig = abs(x1) + abs(x2) + 1; % Epoch length at **30 kHz**
-    epochLength_ds = round(epochLength_orig * (newadrate / fs)); % Downsampled epoch length (e.g., 1 kHz)
+    %epochLength_orig = abs(x1) + abs(x2) + 1; % Epoch length at **30 kHz**
+    %epochLength_ds = round(epochLength_orig * (newadrate / fs)); % Downsampled epoch length (e.g., 1 kHz)
+    epochLength_ds = round((x2 - x1) * (newadrate / fs)) + 1;
 
     %% **Pre-allocate Epoch Matrices**
     numChannels = length(config.channels);
@@ -219,42 +290,74 @@ function [epoched_data] = data_import_v2(directory1, figuresDir, fileName, confi
     numDevTriggers = length(triggers_deviant);
 
     % Initialize  and add a space (+1) for the trigger
-    lfp_std = NaN(numChannels, numStdTriggers, epochLength_ds+1);
-    mua_std = NaN(numChannels, numStdTriggers, epochLength_ds+1);
-    lfp_dev = NaN(numChannels, numDevTriggers, epochLength_ds+1);
-    mua_dev = NaN(numChannels, numDevTriggers, epochLength_ds+1);
+    lfp_std = NaN(numChannels, numStdTriggers, epochLength_ds);
+    mua_std = NaN(numChannels, numStdTriggers, epochLength_ds);
+    lfp_dev = NaN(numChannels, numDevTriggers, epochLength_ds);
+    mua_dev = NaN(numChannels, numDevTriggers, epochLength_ds);
 
-    %% Epoch Data for standards
-    disp('Importing triggered data for standards...');
-    for chIdx = 1:numChannels
-        ch = config.channels(chIdx); % Select correct channel
+    
+    %% Epoch Data for standards 
+    
+        disp('Importing triggered data for standards...');
+        for chIdx = 1:numChannels
+            ch = config.channels(chIdx); % Select correct channel
+            
+            padMs = 150;
+            padSamples = round((padMs / 1000) * fs);  % Padding in samples
 
-        for tIdx = 1:numStdTriggers
-            trigger = triggers_std(tIdx);
+            for tIdx = 1:numStdTriggers
+                trigger = triggers_std(tIdx);
 
-            % **Compute Start/End Indices in 30 kHz**
-            startIndex = max(trigger + x1, 1); % Ensure index is not negative
-            endIndex = min(trigger + x2, hFile.Entity(ch).Count); % Prevent exceeding data range
+                % Expand window for padding
+                paddedStart = max(round(trigger) + x1 - padSamples, 1);
+                paddedEnd   = min(round(trigger) + x2 + padSamples, hFile.Entity(ch).Count);
 
-            % **Prevent Out-of-Bounds Errors**
-            if startIndex >= endIndex
-                warning('Trigger %d on channel %d is out of bounds. Skipping...', tIdx, ch);
-                continue;
+                % Epoch window after padding (still used for trimming later)
+                startIndex = round(trigger) + x1;
+                endIndex   = round(trigger) + x2;
+
+                % Safety check
+                if paddedStart >= paddedEnd
+                    warning('Trigger %d on channel %d is out of bounds. Skipping...', tIdx, ch);
+                    continue;
+                end
+
+                % Request padded data from file
+                paddedLength = paddedEnd - paddedStart + 1;
+                [ns_RESULT, ~, epochDataPadded] = ns_GetAnalogData(hFile, ch, paddedStart, paddedLength);
+
+                if strcmp(ns_RESULT, 'ns_OK') && numel(epochDataPadded) == paddedLength
+                    % Filter the padded data
+                    [lfp_padded, mua_padded] = AV40_filt(epochDataPadded, newadrate, config.filters.lfp, config.filters.mua, fs);
+
+                    % Compute relative indices to slice out the core (unpadded) window
+                    sliceStart = round((startIndex - paddedStart) * (newadrate / fs)) + 1;
+                    sliceEnd   = round((endIndex   - paddedStart) * (newadrate / fs)) + 1;
+
+
+                    % Ensure safe slicing
+                    if sliceEnd > length(lfp_padded)
+                        warning('Slice exceeds padded length. Skipping trigger %d on channel %d.', tIdx, ch);
+                        continue;
+                    end
+
+                    % Extract central (unpadded) filtered window
+                    lfp = lfp_padded(sliceStart:sliceEnd);
+                    mua = mua_padded(sliceStart:sliceEnd);
+
+                    % Store
+                    lfp_std(chIdx, tIdx, :) = lfp;
+                    mua_std(chIdx, tIdx, :) = mua;
+                else
+                    warning('Epoching failed for trigger %d on channel %d. Data mismatch.', tIdx, ch);
+                    continue;
+                end
             end
 
-            % **Retrieve Analog Data from File**
-            [ns_RESULT, ~, epochData] = ns_GetAnalogData(hFile, ch, startIndex, endIndex - startIndex + 1);
-
-            if strcmp(ns_RESULT, 'ns_OK') && numel(epochData) == (endIndex - startIndex + 1)
-                % **Filter and Downsample**
-                [lfp, mua] = AV40_filt(epochData, newadrate, config.filters.lfp, config.filters.mua, fs);
-
-                % **Store Filtered Epoch**
-                lfp_std(chIdx, tIdx, :) = squeeze(lfp);
-                mua_std(chIdx, tIdx, :) = squeeze(mua);
-            end
         end
-    end
+
+     
+
 
 
 
@@ -265,48 +368,116 @@ function [epoched_data] = data_import_v2(directory1, figuresDir, fileName, confi
         mua_std = remap_channels(mua_std);
     
     
-    %% Compute CSD and Bipolar Signals
+    %% Compute CSD or Bipolar Signals
     
-    csd_std = -diff(lfp_std, 2, 1);
-    lfp_std = lfp_std(2:end-1,:,:);
-    mua_std = mua_std(2:end-1,:,:);
+    deriv = config.derivative;
+    if deriv == 1 % first derivative, AKA bipolar FP
+        csd_std = -diff(lfp_std, 1, 1);
+        lfp_std = lfp_std(1:end-1,:,:);
+        mua_std = mua_std(1:end-1,:,:);
+    else % second derivative, AKA the current source density
+        csd_std = -diff(lfp_std, 2, 1);
+        lfp_std = lfp_std(2:end-1,:,:); % match channels for convenience
+        mua_std = mua_std(2:end-1,:,:);
+    end
     
     %% Epoch Data for Deviants
     disp('Importing triggered data for deviants...');
 
-for chIdx = 1:numChannels
-    ch = config.channels(chIdx);
+        for chIdx = 1:numChannels
+            ch = config.channels(chIdx); % Select correct channel
+            
+            padMs = 80;
+            padSamples = round((padMs / 1000) * fs);  % Padding in samples
 
-    for tIdx = 1:numDevTriggers
-        trigger = triggers_deviant(tIdx);
+            for tIdx = 1:numDevTriggers
+                trigger = triggers_deviant(tIdx);
 
-        % **Compute Start/End Indices in 30 kHz**
-        startIndex = max(round(trigger) + x1, 1); % Prevent negative indices
-        endIndex = min(round(trigger) + x2, hFile.Entity(ch).Count); % Prevent exceeding data range
+                % Expand window for padding
+                paddedStart = max(round(trigger) + x1 - padSamples, 1);
+                paddedEnd   = min(round(trigger) + x2 + padSamples, hFile.Entity(ch).Count);
 
-        % **Validate Start and End Indices**
-        if startIndex >= endIndex
-            warning('Trigger %d on channel %d is out of bounds. Skipping...', tIdx, ch);
-            continue;
+                % Epoch window after padding (still used for trimming later)
+                startIndex = round(trigger) + x1;
+                endIndex   = round(trigger) + x2;
+
+                % Safety check
+                if paddedStart >= paddedEnd
+                    warning('Trigger %d on channel %d is out of bounds. Skipping...', tIdx, ch);
+                    continue;
+                end
+
+                % Request padded data from file
+                paddedLength = paddedEnd - paddedStart + 1;
+                [ns_RESULT, ~, epochDataPadded] = ns_GetAnalogData(hFile, ch, paddedStart, paddedLength);
+
+                if strcmp(ns_RESULT, 'ns_OK') && numel(epochDataPadded) == paddedLength
+                    % Filter the padded data
+                    [lfp_padded, mua_padded] = AV40_filt(epochDataPadded, newadrate, config.filters.lfp, config.filters.mua, fs);
+
+                    % Compute relative indices to slice out the core (unpadded) window
+                    sliceStart = round((startIndex - paddedStart) * (newadrate / fs)) + 1;
+                    sliceEnd   = round((endIndex   - paddedStart) * (newadrate / fs)) + 1;
+
+
+                    % Ensure safe slicing
+                    if sliceEnd > length(lfp_padded)
+                        warning('Slice exceeds padded length. Skipping trigger %d on channel %d.', tIdx, ch);
+                        continue;
+                    end
+
+                    % Extract central (unpadded) filtered window
+                    lfp = lfp_padded(sliceStart:sliceEnd);
+                    mua = mua_padded(sliceStart:sliceEnd);
+
+                    % Store
+                    lfp_dev(chIdx, tIdx, :) = lfp;
+                    mua_dev(chIdx, tIdx, :) = mua;
+                else
+                    warning('Epoching failed for trigger %d on channel %d. Data mismatch.', tIdx, ch);
+                    continue;
+                end
+            end
+
         end
 
-        % **Retrieve Analog Data from File**
-        epochLength_actual = endIndex - startIndex + 1; % Ensure correct length
-        [ns_RESULT, ~, epochData] = ns_GetAnalogData(hFile, ch, startIndex, epochLength_actual);
 
-        if strcmp(ns_RESULT, 'ns_OK') && numel(epochData) == epochLength_actual
-            % **Filter and Downsample**
-            [lfp, mua] = AV40_filt(epochData, newadrate, config.filters.lfp, config.filters.mua, fs);
+%% Sort unique trigger types
+% ev = dlmread(epath, ' ');
+% col6=ev(:,6);
+% trigType = col6;
 
-            % **Store Filtered Epoch**
-            lfp_dev(chIdx, tIdx, :) = lfp;
-            mua_dev(chIdx, tIdx, :) = mua;
-        else
-            warning('Epoching failed for trigger %d on channel %d. Data mismatch.', tIdx, ch);
+if ~isempty(config.event_sorting_method)
+    if length(unique(trigType))>1 % unique trigs mean we sort the epoched data
+    % Unique stimulus/trial condition types
+    uniqueTypes = unique(trigType);
+    nCond = length(uniqueTypes);
+
+    % Initialize output struct
+    sortedData = struct();
+
+
+        for condIdx = 1:nCond
+            thisType = uniqueTypes(condIdx);
+
+            % Logical index of trials matching this condition
+            trialMask = trigType == thisType;
+
+            % Extract trials from each data array
+            sortedData(condIdx).trigType = thisType;
+            sortedData(condIdx).lfp = lfp_std(:, trialMask, :);
+            sortedData(condIdx).csd = csd_std(:, trialMask, :);
+            sortedData(condIdx).mua = mua_std(:, trialMask, :);
+
+            % Optional: Store trial indices for debugging
+            sortedData(condIdx).trialIndices = find(trialMask);
         end
+
+
+
     end
 end
-
+    
     
     %% Remap and Compute CSD for Deviants
     if config.channel_remap
@@ -314,9 +485,16 @@ end
         mua_dev = remap_channels(mua_dev);
     end
     
-    csd_dev = -diff(lfp_dev, 2, 1);
-    lfp_dev = lfp_dev(2:end-1,:,:);
-    mua_dev = mua_dev(2:end-1,:,:);
+    deriv = config.derivative;
+    if deriv == 1 % first derivative AKA bipolar lfp
+        csd_dev = -diff(lfp_dev, 1, 1);
+        lfp_dev = lfp_dev(1:end-1,:,:);
+        mua_dev = mua_dev(1:end-1,:,:);
+    else
+        csd_dev = -diff(lfp_dev, 2, 1);
+        lfp_dev = lfp_dev(2:end-1,:,:); % match channels for convenience
+        mua_dev = mua_dev(2:end-1,:,:);
+    end
     
     %% downsample triggers before saving
     
@@ -432,8 +610,8 @@ function plot_baseline_corrected_data(epoched_data, config, condition, figuresDi
     disp(['Making figures for ', condition, ' data']);
 
     % Define baseline correction period
-    baselineStart = -50;  % Start of baseline window (ms)
-    baselineEnd = -5;     % End of baseline window (ms)
+    baselineStart = -30;  % Start of baseline window (ms)
+    baselineEnd = -3;     % End of baseline window (ms)
 
     % Ensure baseline period is within the epoch timeframe
     if baselineStart < config.epoch_tframe(1)
@@ -496,6 +674,8 @@ function plot_baseline_corrected_data(epoched_data, config, condition, figuresDi
 
     timeVector = linspace(config.epoch_tframe(1), config.epoch_tframe(2), size(lfp_bsl, 3));
     numChannels = 1:size(lfp_bsl, 1);
+    numChannelsCSD = 1:size(csd_bsl,1);
+    
 
     % Determine Color Axis for CSD
     csd_min = min(min(squeeze(mean(csd_bsl(:, :, :), 2))));
@@ -528,8 +708,8 @@ function plot_baseline_corrected_data(epoched_data, config, condition, figuresDi
 
     % Plot CSD
     subplot(1, 3, 2);
-    imagesc(timeVector, numChannels, squeeze(mean(csd_bsl, 2)));
-    title(['Trial Avg. CSD (', condition, ')']);
+    imagesc(timeVector, numChannelsCSD, squeeze(mean(csd_bsl, 2)));
+    title(['Trial Avg. bipLFP (', condition, ')']);
     xlabel('Time (ms)');
     ylabel('Channel');
     colorbar;
@@ -538,7 +718,7 @@ function plot_baseline_corrected_data(epoched_data, config, condition, figuresDi
     % Plot MUA (if available)
     if ~isempty(mua_bsl)
         subplot(1, 3, 3);
-        imagesc(timeVector, numChannels, squeeze(mean(mua_bsl, 2)));
+        imagesc(timeVector, numChannelsCSD, squeeze(mean(mua_bsl, 2)));
         title(['Trial Avg. MUA (', condition, ')']);
         xlabel('Time (ms)');
         ylabel('Channel');
@@ -563,7 +743,7 @@ function rawData = remap_channels(rawData)
     % Output:
     % rawData: Remapped raw data with corrected channel alignment
 
-    fprintf('Applying channel remapping to correct alignment mismatch...\n');
+    fprintf('Applying channel remapping ...\n');
     X = 1:2:size(rawData, 1) - 1; % Odd indices
     X1 = 2:2:size(rawData, 1);    % Even indices
 
@@ -573,7 +753,7 @@ function rawData = remap_channels(rawData)
     remappedData(X1, :) = rawData(X, :); % Even -> Odd
 
     rawData = remappedData;
-    disp('done remapping')
+    
 end
 
 
@@ -814,7 +994,7 @@ function timingResults = AV40_importEyelink(dataDirectory, filename)
     
     % Remove file extension
     [~, baseFilename, ~] = fileparts(filename);
-    fprintf('Searching for subdirectory: %s in %s\n', baseFilename, edfDir);
+    %fprintf('Searching for subdirectory: %s in %s\n', baseFilename, edfDir);
 
     %% Step 2: Locate Matching Subdirectory
     subdirs = dir(edfDir);
