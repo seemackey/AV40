@@ -1,6 +1,7 @@
 % import ephys from the ripple system and eyelink data from txt files 
 % chase m 2024
 % epochs to digital triggers and eyelink data, feb '25
+% sorts trigger types from event files, march '25
 
 % Clear workspace and initialize
 clear;
@@ -9,9 +10,9 @@ clc;
 
 % Directories and file names
 
-inputDir = '/Volumes/Samsung03/data/AV40/Peter/pt030/'; % Replace with your input directory
-figuresDir = '/Volumes/Samsung03/data/AV40/Peter/pt030/imported/Aud/'; % Replace with your output directory
-fileName = 'pt030000016.nev'; % Replace with your file name
+inputDir = '/Volumes/Samsung03/data/AV40/Peter/pt034/'; % Replace with your input directory
+figuresDir = '/Volumes/Samsung03/data/AV40/Peter/pt034/imported/Vsearch20kHz/'; % Replace with your output directory
+fileName = 'pt034000025.nev'; % Replace with your file name
 % inputDir = '/Volumes/Samsung03/data/AM/'; % Replace with your input directory
 % figuresDir = '/Volumes/Samsung03/data/AM/'; % Replace with your output directory
 % fileName = 'ke036037037.nev'; % Replace with your file name
@@ -23,10 +24,11 @@ fileName = 'pt030000016.nev'; % Replace with your file name
 
 % Example configuration
 config = struct();
-config.epoch_tframe = [-30, 200]; % Epoch window in ms
+config.epochdata = 0; % boolean, want to epoch the data?
+config.epoch_tframe = [-30, 150]; % Epoch window in ms
 config.ripplefs = 30000; % assumed ripple fs/adrate
 config.eyelinkfs = 1000; %assumed eyelink FS
-config.newadrate = 1000;          % Resampling rate
+config.newadrate = 20000;          % Resampling rate
 config.filters.lfp = [0.5, 300];  % LFP filter range (Hz)
 config.filters.mua = [300, 5000]; % MUA filter range (Hz)
 config.padding = 1000; % ms of padding for epoched data
@@ -55,9 +57,9 @@ try
     
     
     %% make figs
-
+    if config.epochdata == 1
     plot_baseline_corrected_data(epoched_data.standard, config, 'standard', figuresDir, fileName);
-
+    end
     % Plot deviant
     if config.get_deviant == 1
         plot_baseline_corrected_data(epoched_data.deviant, config, 'deviant', figuresDir, fileName);
@@ -322,7 +324,7 @@ function [epoched_data] = data_import_v2(directory1, figuresDir, fileName, confi
 
     
     %% Epoch Data for standards 
-    
+if config.epochdata == 1
         disp('Importing triggered data for standards...');
         for chIdx = 1:numChannels
             ch = config.channels(chIdx); % Select correct channel
@@ -381,7 +383,7 @@ function [epoched_data] = data_import_v2(directory1, figuresDir, fileName, confi
 
         end
 
-     
+
 
 
 
@@ -405,7 +407,7 @@ function [epoched_data] = data_import_v2(directory1, figuresDir, fileName, confi
         lfp_std = lfp_std(2:end-1,:,:); % match channels for convenience
         mua_std = mua_std(2:end-1,:,:);
     end
-    
+
     %% Epoch Data for Deviants
     disp('Importing triggered data for deviants...');
 
@@ -465,7 +467,7 @@ function [epoched_data] = data_import_v2(directory1, figuresDir, fileName, confi
             end
 
         end
-
+end
 
 %% Sort unique trigger types (if applicable)
 % ev = dlmread(epath, ' ');
@@ -505,6 +507,7 @@ end
     
     
     %% Remap and Compute CSD for Deviants
+    if config.epochdata == 1
     if config.channel_remap
         lfp_dev = remap_channels(lfp_dev);
         mua_dev = remap_channels(mua_dev);
@@ -520,6 +523,7 @@ end
         lfp_dev = lfp_dev(2:end-1,:,:); % match channels for convenience
         mua_dev = mua_dev(2:end-1,:,:);
     end
+    end
     
     %% downsample triggers before saving
     
@@ -533,7 +537,7 @@ end
     disp('Importing and downsampling continuous raw data into 1-second chunks...');
 
     chunkSize = fs; % 1-second chunk at original sampling rate (30 kHz)
-    chunkSize_ds = config.newadrate; % Downsampled size (1 kHz per second)
+    chunkSize_ds = config.newadrate; % Downsampled size (e.g. 1 kHz per second)
     totalSamples = hFile.Entity(config.channels(1)).Count; % Total samples in each channel
 
     numChunks = ceil(totalSamples / chunkSize);
@@ -569,7 +573,11 @@ end
             end
         end
     end
-
+    
+    
+    % remap raw channels 
+    continuous_raw = remap_channels(continuous_raw);
+    
     % Save Continuous Raw Data
     
     disp('Continuous raw data imported and downsampled successfully.');
@@ -580,38 +588,52 @@ end
 
     
     %% Save Data
-    epoched_data.standard.lfp = lfp_std;
-    epoched_data.deviant.lfp = lfp_dev;
-    epoched_data.standard.csd = csd_std;
-    epoched_data.deviant.csd = csd_dev;
-    epoched_data.standard.mua = mua_std;
-    epoched_data.deviant.mua = mua_dev;
-    if exist('sortedData','var')
-        epoched_data.sortedData = sortedData;
-    end
-
+    
+    
     % Construct base filename without extensions
     fileBaseNameExt = sprintf('%s_%s', fileName, config.trigger_method);
     fileBaseName = regexprep(fileBaseNameExt, '\.nev|\.mat', '');
-    % Ensure EyelinkData exists before saving imported file
-    importedFilePath = fullfile(figuresDir, [fileBaseName '_imported.mat']);
     
-    
+    %% Save Epoched data
+    if config.epochdata == 1
+        epoched_data.standard.lfp = lfp_std;
+        epoched_data.deviant.lfp = lfp_dev;
+        epoched_data.standard.csd = csd_std;
+        epoched_data.deviant.csd = csd_dev;
+        epoched_data.standard.mua = mua_std;
+        epoched_data.deviant.mua = mua_dev;
+        if exist('sortedData','var')
+            epoched_data.sortedData = sortedData;
+        end
 
-    if exist('EyelinkData', 'var')
-        save(importedFilePath, 'epoched_data', 'triggers_std_ds', 'triggers_deviant_ds', 'EyelinkData','triggers_std_analog', 'config');
+
+        % Ensure EyelinkData exists before saving imported file
+        importedFilePath = fullfile(figuresDir, [fileBaseName '_imported.mat']);
+
+
+
+
+        if exist('EyelinkData', 'var')
+            save(importedFilePath, 'epoched_data', 'triggers_std_ds', 'triggers_deviant_ds', 'EyelinkData','triggers_std_analog', 'config');
+        else
+            warning('EyelinkData not found. Saving without EyelinkData...');
+            save(importedFilePath, 'epoched_data', 'triggers_std_ds', 'triggers_deviant_ds','triggers_std_analog', 'config');
+        end
+    
     else
-        warning('EyelinkData not found. Saving without EyelinkData...');
-        save(importedFilePath, 'epoched_data', 'triggers_std_ds', 'triggers_deviant_ds','triggers_std_analog', 'config');
+        epoched_data = [];
     end
-
+    
+    %% Save Continuous unfiltered data
     % Ensure continuous file has the exact same base name, only replacing "_imported" with "_continuous"
-    continuousFileBase = strrep(importedFilePath, '_imported.mat', '_continuous.mat');
+    continuousFileBase = fullfile(figuresDir, [fileBaseName '_continuous.mat']);
 
     % Save continuous data only if store_cont_data flag is set
+    
     if config.store_cont_data == 1 
-        save(continuousFileBase, 'continuous_raw', 'triggers_std_ds', 'triggers_deviant_ds','triggers_std_analog', 'read_me_plz');
+        save(continuousFileBase, 'continuous_raw', 'triggers_std_ds', 'triggers_deviant_ds', 'triggers_std_analog', 'config', '-v7.3');
     end
+
 
     disp('Data import complete!');
 end
@@ -980,7 +1002,7 @@ function rawData = remap_channels(rawData)
     % REMAP_CHANNELS - Adjusts raw data channels to correct hardware mismatch
     %
     % Parameters:
-    % rawData: Original raw electrophysiology data matrix (channels x samples)
+    % rawData: Original raw electrophysiology data matrix (channels x trials x samples)
     %
     % Output:
     % rawData: Remapped raw data with corrected channel alignment
@@ -991,8 +1013,8 @@ function rawData = remap_channels(rawData)
 
     % Swap channels
     remappedData = rawData; % Copy original data
-    remappedData(X, :) = rawData(X1, :); % Odd -> Even
-    remappedData(X1, :) = rawData(X, :); % Even -> Odd
+    remappedData(X, :,:) = rawData(X1, :,:); % Odd -> Even
+    remappedData(X1, :,:) = rawData(X, :,:); % Even -> Odd
 
     rawData = remappedData;
     
