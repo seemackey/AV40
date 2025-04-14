@@ -3,7 +3,7 @@ function [stitchedData, triggers_std_analog_trimmed] = AV40_StitchContinuousData
     % 
     % Inputs:
     %   continuous_raw        - Channels x Epochs x Time (Continuous data from AV40_Import.mat)
-    %   triggers_std_analog   - Trigger times (in samples) corresponding to 30 kHz
+    %   triggers_std_analog   - Trigger times (in 30 kHz samples b/c Ripple Sys Default) 
     %   chunkStartTimes       - Start times of each epoch (in seconds)
     %   desiredDuration       - Duration to stitch in seconds
     %   fs                    - the fs of both the chunked and stitched data
