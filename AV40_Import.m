@@ -2,8 +2,7 @@
 % chase m 2024
 % epochs to digital triggers and eyelink data, feb '25
 % sorts trigger types from event files, march '25
-% old tono paradigm in new tdt rig needs to be fixed (NaNs need to be
-% sorted; triggering may have issues)
+% fixed digital triggering from TDT programs, may '25
 
 % Clear workspace and initialize
 clear;
