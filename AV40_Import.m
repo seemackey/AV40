@@ -2,6 +2,8 @@
 % chase m 2024
 % epochs to digital triggers and eyelink data, feb '25
 % sorts trigger types from event files, march '25
+% old tono paradigm in new tdt rig needs to be fixed (NaNs need to be
+% sorted; triggering may have issues)
 
 % Clear workspace and initialize
 clear;
@@ -10,9 +12,9 @@ clc;
 
 % Directories and file names
 
-inputDir = '/Volumes/Samsung03/data/AV40/Peter/pt034/'; % Replace with your input directory
-figuresDir = '/Volumes/Samsung03/data/AV40/Peter/pt034/imported/Vsearch20kHz/'; % Replace with your output directory
-fileName = 'pt034000025.nev'; % Replace with your file name
+inputDir = '/Volumes/Samsung03/data/AV40/Peter/pt042043/'; % Replace with your input directory
+figuresDir = '/Volumes/Samsung03/data/AV40/Peter/pt042043/imported/AMThal/'; % Replace with your output directory
+fileName = 'pt042043018.nev'; % Replace with your file name
 % inputDir = '/Volumes/Samsung03/data/AM/'; % Replace with your input directory
 % figuresDir = '/Volumes/Samsung03/data/AM/'; % Replace with your output directory
 % fileName = 'ke036037037.nev'; % Replace with your file name
@@ -24,27 +26,27 @@ fileName = 'pt034000025.nev'; % Replace with your file name
 
 % Example configuration
 config = struct();
-config.epochdata = 0; % boolean, want to epoch the data?
-config.epoch_tframe = [-30, 150]; % Epoch window in ms
+config.epochdata = 1; % boolean, want to epoch the data?
+config.epoch_tframe = [-50, 700]; % Epoch window in ms
 config.ripplefs = 30000; % assumed ripple fs/adrate
 config.eyelinkfs = 1000; %assumed eyelink FS
-config.newadrate = 20000;          % Resampling rate
+config.newadrate = 1000;          % Resampling rate
 config.filters.lfp = [0.5, 300];  % LFP filter range (Hz)
 config.filters.mua = [300, 5000]; % MUA filter range (Hz)
 config.padding = 1000; % ms of padding for epoched data
 config.derivative = 1; % CSD is second (2) deriv, bipLFP is 1st deriv (1)
 config.trigger_channel = 29;  %  analog trigger channel for aud is hardcoded for now, sorry dear reader
-config.channels = [1:24];             % ephys data channels 1:24 or 33:56
+config.channels = [1:23];             % ephys data channels 1:24 or 33:56
 config.channel_remap = true; % Enable ripple channel remapping 
-config.trigger_method = 'analog'; % 'digital', 'analog', 'VDDT', 'VST' *always use analog for aud epoching*
+config.trigger_method = 'digital'; % 'digital', 'analog', 'VDDT', 'VST' *always use analog for aud epoching*
 config.trigger_threshold = 50;   % Threshold for analog trigger detection
 config.event_entity_id = 1;       % Default Event Entity ID
 config.artifact_threshold = 3;    % Z-score threshold for artifact rejection
 config.checksync = 0; % check sync between ripple and eyelink, boolean
 config.get_deviant = 0; %boolean
-config.event_sorting_method = [];%'ev2_column';%'ev2_column'; % a string that picks 'oldtono' or an ev2 column; requires digital trigger method
+config.event_sorting_method = 'oldtono';%'ev2_column';%'ev2_column'; % a string that picks 'oldtono' or an ev2 column; requires digital trigger method
 config.selectedVariable = [];%'Modulation_Freq';%'Modulation_Freq'; % variable in event file to epoch to;requires digital trigger method
-config.store_cont_data = 1; %takes a while, stores 1s chunks@newadrate
+config.store_cont_data = 0; %takes a while, stores 1s chunks@newadrate
 
 %% MAIN FUNCTION CALL
 try
@@ -68,7 +70,7 @@ try
     % plot sorted trig types
     if ~isempty(config.event_sorting_method)
         if contains(config.event_sorting_method,'oldtono')
-           plot_baseline_corrected_data_mult_trigType(epoched_data, config, 'standard', figuresDir, fileName)
+           plot_baseline_corrected_data_mult_trigType(epoched_data, config, figuresDir, fileName)
 
         end
     end
@@ -130,14 +132,16 @@ function [epoched_data] = data_import_v2(directory1, figuresDir, fileName, confi
         % Define TTL "high" values (adjust threshold as needed)
         isHigh = all_TTLs >= 1000;  % Catch only pulses (e.g., 32767)
 
-        % Detect rising edges 
-        risingEdges = [false; diff(isHigh) == 1]; % Detect only rising edges
-
         % Extract timestamps at rising edges only
         triggers_std = all_timestamps(isHigh);
+        isi = diff(triggers_std);
+        isi_real = isi > 0.009; 
+        badTrigIdx =  find(isi_real == 0);
+        triggers_std(badTrigIdx) = [];
 
         % Convert to Ripple sample rate (30 kHz)
         triggers_std = round(triggers_std(:) * config.ripplefs);
+
 
         triggers_std_analog = [];
         triggers_deviant = [];
@@ -167,8 +171,8 @@ function [epoched_data] = data_import_v2(directory1, figuresDir, fileName, confi
                     trigType = datFile(:, 1); % adjust fieldname if needed
 
                     if length(trigType) ~= length(triggers_std)
-                        warning('Mismatch: toneIDs (%d) ? triggers (%d)', length(trigType), length(triggers_std));
-                        triggers_std = triggers_std(1:length(trigType));
+                        warning('Mismatch: trigIDs (%d) ? triggers (%d)', length(trigType), length(triggers_std));
+                        %triggers_std = triggers_std(1:length(trigType));
                     end
 
                     triggers_deviant = NaN; % not applicable
@@ -475,11 +479,24 @@ end
 % trigType = col6;
 
 if ~isempty(config.event_sorting_method)
-    if length(unique(trigType))>1 % unique trigs mean we sort the epoched data
+    if length(unique(trigType(~isnan(trigType))))>1 % unique trigs mean we sort the epoched data
     % Unique stimulus/trial condition types
     uniqueTypes = unique(trigType);
+    
+    % NaN is used by some programs to indicate broadband noise
+    % so let's sort the NaNs too
+    
+    if sum(isnan(uniqueTypes))>0 % NaN detected
+        nantypesidx = isnan(uniqueTypes); % get their indices
+        firstNaN = min(find(nantypesidx==1));
+        uniqueTypes = uniqueTypes(1:firstNaN);
+    end
+        
+        
     nCond = length(uniqueTypes);
-
+    
+    
+        
     % Initialize output struct
     sortedData = struct();
     disp('Sorting unique trigger types')
@@ -488,7 +505,11 @@ if ~isempty(config.event_sorting_method)
             thisType = uniqueTypes(condIdx);
 
             % Logical index of trials matching this condition
-            trialMask = trigType == thisType;
+            if ~isnan(thisType)
+                trialMask = trigType == thisType;
+            else
+                trialMask = isnan(trigType);
+            end
 
             % Extract trials from each data array
             sortedData(condIdx).trigType = thisType;
@@ -614,10 +635,10 @@ end
 
 
         if exist('EyelinkData', 'var')
-            save(importedFilePath, 'epoched_data', 'triggers_std_ds', 'triggers_deviant_ds', 'EyelinkData','triggers_std_analog', 'config');
+            save(importedFilePath, 'epoched_data', 'triggers_std_ds', 'triggers_deviant_ds', 'EyelinkData','triggers_std_analog', 'config','-v7.3');
         else
             warning('EyelinkData not found. Saving without EyelinkData...');
-            save(importedFilePath, 'epoched_data', 'triggers_std_ds', 'triggers_deviant_ds','triggers_std_analog', 'config');
+            save(importedFilePath, 'epoched_data', 'triggers_std_ds', 'triggers_deviant_ds','triggers_std_analog', 'config','-v7.3');
         end
     
     else
@@ -784,172 +805,183 @@ function plot_baseline_corrected_data(epoched_data, config, condition, figuresDi
     disp(['Baseline correction and plots for ', condition, ' have been saved successfully.']);
 end
 
-function plot_baseline_corrected_data_mult_trigType(epoched_data, config, condition, figuresDir, fileName)
-     % Adapted to handle the new data structure with trigType grouping
-    disp(['Making figures for ', condition, ' data']);
+function plot_baseline_corrected_data_mult_trigType(epoched_data, config, figuresDir, fileName)
+ % Adapted to handle the new data structure with trigType grouping
+disp(['oo you are fancy; Making figures for mult trig types']);
 
-    % Define baseline correction period
-    baselineStart = -30;  
-    baselineEnd = -3;     
+% Define baseline correction period
+baselineStart = -30;  
+baselineEnd = -3;     
 
-    % Ensure baseline period is within the epoch timeframe
-    if baselineStart < config.epoch_tframe(1)
-        warning('Baseline start is outside the epoch range. Using start of epoch.');
-        baselineStart = config.epoch_tframe(1);
-    end
-    if baselineEnd > config.epoch_tframe(2)
-        warning('Baseline end is outside the epoch range. Using end of epoch.');
-        baselineEnd = config.epoch_tframe(2);
-    end
+% Ensure baseline period is within the epoch timeframe
+if baselineStart < config.epoch_tframe(1)
+    warning('Baseline start is outside the epoch range. Using start of epoch.');
+    baselineStart = config.epoch_tframe(1);
+end
+if baselineEnd > config.epoch_tframe(2)
+    warning('Baseline end is outside the epoch range. Using end of epoch.');
+    baselineEnd = config.epoch_tframe(2);
+end
 
-    epochTimeframe = config.epoch_tframe(1):config.epoch_tframe(2); 
-    fs = config.newadrate;
+epochTimeframe = config.epoch_tframe(1):config.epoch_tframe(2); 
+fs = config.newadrate;
 
-    % Find sample indices corresponding to baseline range
-    [~, baselineStartIdx] = min(abs(epochTimeframe - baselineStart));
-    [~, baselineEndIdx] = min(abs(epochTimeframe - baselineEnd));
-    baselineIdx = baselineStartIdx:baselineEndIdx;
+% Find sample indices corresponding to baseline range
+[~, baselineStartIdx] = min(abs(epochTimeframe - baselineStart));
+[~, baselineEndIdx] = min(abs(epochTimeframe - baselineEnd));
+baselineIdx = baselineStartIdx:baselineEndIdx;
 
-    % Extract unique trigTypes
-    uniqueTrigTypes = unique([epoched_data.sortedData.trigType]);
+% Extract unique trigTypes
+uniqueTrigTypes = unique([epoched_data.sortedData.trigType]);
 
-    for tt = 1:length(uniqueTrigTypes)
-        trigType = uniqueTrigTypes(tt);
-        disp(['Processing trigType: ', num2str(trigType)]);
-        
-        % Find indices for this trigType
+for tt = 1:length(uniqueTrigTypes)
+    trigType = uniqueTrigTypes(tt);
+    disp(['Processing trigType: ', num2str(trigType)]);
+
+    % Find indices for this trigType
+    if ~isnan(trigType)
         indices = find([epoched_data.sortedData.trigType] == trigType);
+    else
         
-        % Collect baseline-corrected data across all indices of this trigType
-        lfp_all = [];
-        csd_all = [];
-        mua_all = [];
-        
-        for idx = indices
-            data = epoched_data.sortedData(idx);
-            
-            % Initialize arrays for this particular entry
-            lfp_bsl = zeros(size(data.lfp));
-            csd_bsl = zeros(size(data.csd));
-            if ~isempty(data.mua)
-                mua_bsl = zeros(size(data.mua));
-            else
-                mua_bsl = [];
-            end
+        indices = tt; % for some reason this one broke my brain
+    end
 
-            % artifact reject
-                [epoched_data.lfp, ~] = MTF_rejectartifacts(data.lfp, 'median', 3);
-                [epoched_data.csd, ~] = MTF_rejectartifacts(data.csd, 'median', 3);
-                [epoched_data.mua, ~] = MTF_rejectartifacts(data.mua, 'median', 3);
-            
-            
-            % Baseline Correction for each channel and trial
-            for chct = 1:size(data.lfp, 1)
-                for trct = 1:size(data.lfp, 2)
-                    % LFP Baseline Correction
-                    lfp_bsl(chct, trct, :) = squeeze(data.lfp(chct, trct, :)) - ...
-                        mean(squeeze(data.lfp(chct, trct, baselineIdx)), 'omitnan');
-                    
-                    % CSD Baseline Correction
-                    csd_bsl(chct, trct, :) = squeeze(data.csd(chct, trct, :)) - ...
-                        mean(squeeze(data.csd(chct, trct, baselineIdx)), 'omitnan');
-                    
-                    % MUA Baseline Correction (if available)
-                    if ~isempty(mua_bsl)
-                        mua_bsl(chct, trct, :) = squeeze(data.mua(chct, trct, :)) - ...
-                            mean(squeeze(data.mua(chct, trct, baselineIdx)), 'omitnan');
-                    end
+    % Collect baseline-corrected data across all indices of this trigType
+    lfp_all = [];
+    csd_all = [];
+    mua_all = [];
+
+    for idx = indices
+        data = epoched_data.sortedData(idx);
+
+        % Initialize arrays for this particular entry
+        lfp_bsl = zeros(size(data.lfp));
+        csd_bsl = zeros(size(data.csd));
+        if ~isempty(data.mua)
+            mua_bsl = zeros(size(data.mua));
+        else
+            mua_bsl = [];
+        end
+
+        % artifact reject
+            [epoched_data.lfp, ~] = MTF_rejectartifacts(data.lfp, 'median', 3);
+            [epoched_data.csd, ~] = MTF_rejectartifacts(data.csd, 'median', 3);
+            [epoched_data.mua, ~] = MTF_rejectartifacts(data.mua, 'median', 3);
+
+
+        % Baseline Correction for each channel and trial
+        for chct = 1:size(data.lfp, 1)
+            for trct = 1:size(data.lfp, 2)
+                % LFP Baseline Correction
+                lfp_bsl(chct, trct, :) = squeeze(data.lfp(chct, trct, :)) - ...
+                    mean(squeeze(data.lfp(chct, trct, baselineIdx)), 'omitnan');
+
+                % CSD Baseline Correction
+                csd_bsl(chct, trct, :) = squeeze(data.csd(chct, trct, :)) - ...
+                    mean(squeeze(data.csd(chct, trct, baselineIdx)), 'omitnan');
+
+                % MUA Baseline Correction (if available)
+                if ~isempty(mua_bsl)
+                    mua_bsl(chct, trct, :) = squeeze(data.mua(chct, trct, :)) - ...
+                        mean(squeeze(data.mua(chct, trct, baselineIdx)), 'omitnan');
                 end
             end
-
-            % Concatenate the baseline-corrected data
-            lfp_all = cat(2, lfp_all, lfp_bsl);
-            csd_all = cat(2, csd_all, csd_bsl);
-            if ~isempty(mua_bsl)
-                mua_all = cat(2, mua_all, mua_bsl);
-            end
         end
 
-        % Trial averaging across the second dimension (trials)
-        lfp_avg = mean(lfp_all, 2, 'omitnan');
-        csd_avg = mean(csd_all, 2, 'omitnan');
-        if ~isempty(mua_all)
-            mua_avg = mean(mua_all, 2, 'omitnan');
-        else
-            mua_avg = [];
+        % Concatenate the baseline-corrected data
+        lfp_all = cat(2, lfp_all, lfp_bsl);
+        csd_all = cat(2, csd_all, csd_bsl);
+        if ~isempty(mua_bsl)
+            mua_all = cat(2, mua_all, mua_bsl);
         end
-        
-        % Plotting parameters
-        timeVector = linspace(config.epoch_tframe(1), config.epoch_tframe(2), size(lfp_avg, 3));
-        numChannels = 1:size(lfp_avg, 1);
-        numChannelsCSD = 1:size(csd_avg, 1);
-
-        % Determine symmetrical color axis
-        lfp_min = min(lfp_avg, [], 'all');
-        lfp_max = max(lfp_avg, [], 'all');
-        lfp_caxis = [-max(abs([lfp_min, lfp_max])), max(abs([lfp_min, lfp_max]))];
-
-        csd_min = min(csd_avg, [], 'all');
-        csd_max = max(csd_avg, [], 'all');
-        csd_caxis = [-max(abs([csd_min, csd_max])), max(abs([csd_min, csd_max]))];
-
-        if ~isempty(mua_avg)
-            mua_min = min(mua_avg, [], 'all');
-            mua_max = max(mua_avg, [], 'all');
-            mua_caxis = [-max(abs([mua_min, mua_max])), max(abs([mua_min, mua_max]))];
-        end
-
-        % Plot Figures
-        fig = figure('Position', [200, 200, 1200, 700]);
-
-        % Plot LFP
-        subplot(1, 3, 1);
-        imagesc(timeVector, numChannels, squeeze(lfp_avg));
-        title(['Trial Avg. LFP (', condition, ', TrigType ', num2str(trigType), ')']);
-        xlabel('Time (ms)');
-        ylabel('Channel');
-        colormap(flipud(jet));
-        colorbar;
-        caxis(lfp_caxis);
-
-        % Plot CSD
-        subplot(1, 3, 2);
-        imagesc(timeVector, numChannelsCSD, squeeze(csd_avg));
-        title(['Trial Avg. CSD (', condition, ', TrigType ', num2str(trigType), ')']);
-        xlabel('Time (ms)');
-        ylabel('Channel');
-        colorbar;
-        caxis(csd_caxis);
-
-        % Plot MUA (if available)
-        if ~isempty(mua_avg)
-            subplot(1, 3, 3);
-            imagesc(timeVector, numChannelsCSD, squeeze(mua_avg));
-            title(['Trial Avg. MUA (', condition, ', TrigType ', num2str(trigType), ')']);
-            xlabel('Time (ms)');
-            ylabel('Channel');
-            colorbar;
-            caxis(mua_caxis);
-        end
-
-        % Save Figures
-        saveas(fig, fullfile(figuresDir, [fileName, '_', config.trigger_method, '_trigType', num2str(trigType), '_avg_profiles.fig']));
-        saveas(fig, fullfile(figuresDir, [fileName, '_', config.trigger_method, '_trigType', num2str(trigType), '_avg_profiles.jpg']));
-        close(fig);
-        
-        disp(['Baseline correction and plots for trigType ', num2str(trigType), ' have been saved successfully.']);
-        
-        % save mean
-        durationForTuningCurve = 70;
-        if ~isempty(mua_avg)
-            tuningcurve(tt,:) = mean(mua_avg(:,baselineEndIdx:durationForTuningCurve),2);
-        end
-        
     end
+
+    % Trial averaging across the second dimension (trials)
+    lfp_avg = mean(lfp_all, 2, 'omitnan');
+    csd_avg = mean(csd_all, 2, 'omitnan');
+    if ~isempty(mua_all)
+        mua_avg = mean(mua_all, 2, 'omitnan');
+    else
+        mua_avg = [];
+    end
+
+    % Plotting parameters
+    timeVector = linspace(config.epoch_tframe(1), config.epoch_tframe(2), size(lfp_avg, 3));
+    numChannels = 1:size(lfp_avg, 1);
+    numChannelsCSD = 1:size(csd_avg, 1);
+
+    % Determine symmetrical color axis
+    lfp_min = min(lfp_avg, [], 'all');
+    lfp_max = max(lfp_avg, [], 'all');
+    lfp_caxis = [-max(abs([lfp_min, lfp_max])), max(abs([lfp_min, lfp_max]))];
+
+    csd_min = min(csd_avg, [], 'all');
+    csd_max = max(csd_avg, [], 'all');
+    csd_caxis = [-max(abs([csd_min, csd_max])), max(abs([csd_min, csd_max]))];
+
+    if ~isempty(mua_avg)
+        mua_min = min(mua_avg, [], 'all');
+        mua_max = max(mua_avg, [], 'all');
+        mua_caxis = [-max(abs([mua_min, mua_max])), max(abs([mua_min, mua_max]))];
+    end
+
+    % Plot Figures
+    fig = figure('Position', [200, 200, 1200, 700]);
+
+    % Plot LFP
+    subplot(1, 3, 1);
+    imagesc(timeVector, numChannels, squeeze(lfp_avg));
+    title(['Trial Avg. LFP (' ', TrigType ', num2str(trigType), ')']);
+    xlabel('Time (ms)');
+    ylabel('Channel');
+    colormap(flipud(jet));
+    colorbar;
+    caxis(lfp_caxis);
+
+    % Plot CSD
+    subplot(1, 3, 2);
+    imagesc(timeVector, numChannelsCSD, squeeze(csd_avg));
+    title(['Trial Avg. CSD (' ', TrigType ', num2str(trigType), ')']);
+    xlabel('Time (ms)');
+    ylabel('Channel');
+    colorbar;
+    caxis(csd_caxis);
+
+    % Plot MUA (if available)
+    if ~isempty(mua_avg)
+        subplot(1, 3, 3);
+        imagesc(timeVector, numChannelsCSD, squeeze(mua_avg));
+        title(['Trial Avg. MUA (' ', TrigType ', num2str(trigType), ')']);
+        xlabel('Time (ms)');
+        ylabel('Channel');
+        colorbar;
+        caxis(mua_caxis);
+    end
+
+    % Save Figures
+    saveas(fig, fullfile(figuresDir, [fileName, '_', config.trigger_method, '_trigType', num2str(trigType), '_avg_profiles.fig']));
+    saveas(fig, fullfile(figuresDir, [fileName, '_', config.trigger_method, '_trigType', num2str(trigType), '_avg_profiles.jpg']));
+    close(fig);
+
+    disp(['Baseline correction and plots for trigType ', num2str(trigType), ' have been saved successfully.']);
+
+    % save mean
+    durationForTuningCurve = 100;
+    if ~isempty(mua_avg)
+        tuningcurve(tt,:) = mean(mua_avg(:,baselineEndIdx:durationForTuningCurve),2);
+    end
+    
+    
+end
 
 % Generate average MUA data matrix (e.g., tuningcurve)
 % Assume tuningcurve is of size [numTrigTypes, numChannels]
 % Where rows = trigger types (e.g., tone frequencies), columns = channels
+for norm_count = 1:size(tuningcurve,2)
+    tuningcurve(:,norm_count) = tuningcurve(:,norm_count)/max(tuningcurve(:,norm_count));
+end
+
+
 numTrigTypes = size(tuningcurve, 1);
 numChannels = size(tuningcurve, 2);
 
@@ -958,7 +990,11 @@ numChannels = size(tuningcurve, 2);
 figMUA = figure('Position', [200, 200, 1200, 700]);
 
 hold on;
-offset = 0.5;  % Offset to separate channel plots for clarity
+% Determine a dynamic offset that avoids overlap
+channelRanges = max(tuningcurve, [], 1) - min(tuningcurve, [], 1);  % range per channel
+%offset = max(channelRanges) * 1.5;  % buffer to avoid overlaps
+offset = 0.4;
+
 colors = lines(size(tuningcurve, 2));  % Generate unique colors for each channel
 numChannels = size(tuningcurve, 2);
 
@@ -969,15 +1005,17 @@ yData = fliplr(1:numChannels);  % Reversing the order of channels
 for ch = 1:numChannels
     % Calculate the offset for each channel in reversed order
     y_offset = find(yData == ch) * offset;  % Find where the current channel would be plotted on the flipped y-axis
-    plot(uniqueTrigTypes, tuningcurve(:,ch) + y_offset, 'Color', colors(ch,:),'LineWidth',1);
+    plot(1:length(uniqueTrigTypes), tuningcurve(:,ch) + y_offset, 'Color', colors(ch,:),'LineWidth',1);
 end
 
 % Add labels and title
-set(gca, 'LineWidth', 1.5);  % Thicken the axis lines (default is usually 0.5)
-set(gca, 'YDir', 'normal');  % Important! Keep YDir normal to not flip data
+set(gca, 'LineWidth', 1.5);  %thicccc
+set(gca, 'YDir', 'normal');  
+%set(gca, 'XScale', 'log')
 
 title('Mean MUA');
-xlabel('Tone Freq (kHz)');
+%xlabel('Tone Freq (kHz)');
+%xlabel('Mod Freq')
 ylabel('Channels (Offset for Clarity)');
 set(gca,'FontSize',16)
 
@@ -986,14 +1024,17 @@ yticks((1:numChannels) * offset);
 yticklabels(arrayfun(@(x) sprintf('Ch %d', x), yData, 'UniformOutput', false));
 
 xticks(1:length(uniqueTrigTypes));  % Make sure xticks match your trigger types
-xticklabels({'0.3','0.5','0.7','1','1.4','2','2.8','4','5.6','8','11','16','22','32','Noise'});
+
+if nanmean(uniqueTrigTypes) > 300
+    xticklabels({'0.3','0.5','0.7','1','1.4','2','2.8','4','5.6','8','11','16','22','32','Noise'});
+end
+    
 grid on;
 hold off;
 
 % Save Figures
 saveas(figMUA, fullfile(figuresDir, [fileName, '_', config.trigger_method, '_trigType_MUA_TuningCurve.fig']));
 saveas(figMUA, fullfile(figuresDir, [fileName, '_', config.trigger_method, '_trigType_MUA_TuningCurve.jpg']));
-
 end
 
 
