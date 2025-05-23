@@ -11,9 +11,9 @@ clc;
 
 % Directories and file names
 
-inputDir = '/Volumes/Samsung03/data/AV40/Peter/pt042043/'; % Replace with your input directory
-figuresDir = '/Volumes/Samsung03/data/AV40/Peter/pt042043/imported/AMThal/'; % Replace with your output directory
-fileName = 'pt042043018.nev'; % Replace with your file name
+inputDir = 'W:\Peter\Data\pt046047\'; % Replace with your input directory
+figuresDir = cd; % Replace with your output directory
+fileName = 'pt046047026.nev'; % Replace with your file name
 % inputDir = '/Volumes/Samsung03/data/AM/'; % Replace with your input directory
 % figuresDir = '/Volumes/Samsung03/data/AM/'; % Replace with your output directory
 % fileName = 'ke036037037.nev'; % Replace with your file name
@@ -26,24 +26,24 @@ fileName = 'pt042043018.nev'; % Replace with your file name
 % Example configuration
 config = struct();
 config.epochdata = 1; % boolean, want to epoch the data?
-config.epoch_tframe = [-50, 700]; % Epoch window in ms
+config.epoch_tframe = [-50, 400]; % Epoch window in ms
 config.ripplefs = 30000; % assumed ripple fs/adrate
 config.eyelinkfs = 1000; %assumed eyelink FS
 config.newadrate = 1000;          % Resampling rate
 config.filters.lfp = [0.5, 300];  % LFP filter range (Hz)
 config.filters.mua = [300, 5000]; % MUA filter range (Hz)
 config.padding = 1000; % ms of padding for epoched data
-config.derivative = 1; % CSD is second (2) deriv, bipLFP is 1st deriv (1)
+config.derivative = 2; % CSD is second (2) deriv, bipLFP is 1st deriv (1)
 config.trigger_channel = 29;  %  analog trigger channel for aud is hardcoded for now, sorry dear reader
-config.channels = [1:23];             % ephys data channels 1:24 or 33:56
+config.channels = [37:47];             % ephys data channels 1:24 or 33:56
 config.channel_remap = true; % Enable ripple channel remapping 
-config.trigger_method = 'digital'; % 'digital', 'analog', 'VDDT', 'VST' *always use analog for aud epoching*
+config.trigger_method = 'segment'; % 'digital', 'analog', 'VDDT', 'VST' *always use analog for aud epoching*
 config.trigger_threshold = 50;   % Threshold for analog trigger detection
 config.event_entity_id = 1;       % Default Event Entity ID
 config.artifact_threshold = 3;    % Z-score threshold for artifact rejection
 config.checksync = 0; % check sync between ripple and eyelink, boolean
 config.get_deviant = 0; %boolean
-config.event_sorting_method = 'oldtono';%'ev2_column';%'ev2_column'; % a string that picks 'oldtono' or an ev2 column; requires digital trigger method
+config.event_sorting_method = [];%'ev2_column';%'ev2_column'; % a string that picks 'oldtono' or an ev2 column; requires digital trigger method
 config.selectedVariable = [];%'Modulation_Freq';%'Modulation_Freq'; % variable in event file to epoch to;requires digital trigger method
 config.store_cont_data = 0; %takes a while, stores 1s chunks@newadrate
 
@@ -207,7 +207,23 @@ function [epoched_data] = data_import_v2(directory1, figuresDir, fileName, confi
             end
         
         
-       
+    elseif contains(config.trigger_method, 'segment')
+        fprintf('Using segment entity %d as triggers\n', 1);
+    
+        segEntID = 1;
+        numSegments = hFile.Entity(segEntID).Count;
+    
+        triggers_std = zeros(numSegments, 1);
+    
+        for i = 1:numSegments
+            [~, ts, ~, ~, ~] = ns_GetSegmentData(hFile, segEntID, i);
+            triggers_std(i) = ts;
+        end
+    
+        triggers_std = round(triggers_std(:) * config.ripplefs);  % convert to samples
+        triggers_deviant = [];
+        triggers_std_analog = [];
+   
     elseif contains(config.trigger_method,'ADDT')
     
     
