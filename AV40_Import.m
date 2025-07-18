@@ -11,9 +11,9 @@ clc;
 
 % Directories and file names
 
-inputDir = 'W:\Peter\Data\pt046047\'; % Replace with your input directory
-figuresDir = cd; % Replace with your output directory
-fileName = 'pt046047026.nev'; % Replace with your file name
+inputDir = '/Volumes/Samsung03/Peter/pt056057/'; % Replace with your input directory
+figuresDir = '/Volumes/Samsung03/Peter/pt056057/oldtonoThal'; % Replace with your output directory
+fileName = 'pt056057018.nev'; % Replace with your file name
 % inputDir = '/Volumes/Samsung03/data/AM/'; % Replace with your input directory
 % figuresDir = '/Volumes/Samsung03/data/AM/'; % Replace with your output directory
 % fileName = 'ke036037037.nev'; % Replace with your file name
@@ -26,24 +26,25 @@ fileName = 'pt046047026.nev'; % Replace with your file name
 % Example configuration
 config = struct();
 config.epochdata = 1; % boolean, want to epoch the data?
-config.epoch_tframe = [-50, 400]; % Epoch window in ms
+config.epoch_tframe = [-50, 200]; % Epoch window in ms
 config.ripplefs = 30000; % assumed ripple fs/adrate
 config.eyelinkfs = 1000; %assumed eyelink FS
 config.newadrate = 1000;          % Resampling rate
 config.filters.lfp = [0.5, 300];  % LFP filter range (Hz)
 config.filters.mua = [300, 5000]; % MUA filter range (Hz)
 config.padding = 1000; % ms of padding for epoched data
-config.derivative = 2; % CSD is second (2) deriv, bipLFP is 1st deriv (1)
+config.derivative = 1; % CSD is second (2) deriv, bipLFP is 1st deriv (1)
 config.trigger_channel = 29;  %  analog trigger channel for aud is hardcoded for now, sorry dear reader
-config.channels = [37:47];             % ephys data channels 1:24 or 33:56
+config.channels = [1:24];             % ephys data channels 1:24 or 33:56
 config.channel_remap = true; % Enable ripple channel remapping 
-config.trigger_method = 'segment'; % 'digital', 'analog', 'VDDT', 'VST' *always use analog for aud epoching*
+config.trigger_method = 'digital'; % 'digital', 'analog', 'VDDT', 'VST' *always use analog for aud epoching*
 config.trigger_threshold = 50;   % Threshold for analog trigger detection
 config.event_entity_id = 1;       % Default Event Entity ID
 config.artifact_threshold = 3;    % Z-score threshold for artifact rejection
 config.checksync = 0; % check sync between ripple and eyelink, boolean
 config.get_deviant = 0; %boolean
-config.event_sorting_method = [];%'ev2_column';%'ev2_column'; % a string that picks 'oldtono' or an ev2 column; requires digital trigger method
+config.event_sorting_method = 'oldtono';%'ev2_column';%'ev2_column'; % a string that picks 'oldtono' or an ev2 column; requires digital trigger method
+config.durationForTuningCurve = 30;
 config.selectedVariable = [];%'Modulation_Freq';%'Modulation_Freq'; % variable in event file to epoch to;requires digital trigger method
 config.store_cont_data = 0; %takes a while, stores 1s chunks@newadrate
 
@@ -845,6 +846,8 @@ fs = config.newadrate;
 [~, baselineStartIdx] = min(abs(epochTimeframe - baselineStart));
 [~, baselineEndIdx] = min(abs(epochTimeframe - baselineEnd));
 baselineIdx = baselineStartIdx:baselineEndIdx;
+durationMs = config.durationForTuningCurve;
+[~, durationForTuningCurve] = min(abs(epochTimeframe - durationMs))
 
 % Extract unique trigTypes
 uniqueTrigTypes = unique([epoched_data.sortedData.trigType]);
@@ -879,9 +882,9 @@ for tt = 1:length(uniqueTrigTypes)
         end
 
         % artifact reject
-            [epoched_data.lfp, ~] = MTF_rejectartifacts(data.lfp, 'median', 3);
-            [epoched_data.csd, ~] = MTF_rejectartifacts(data.csd, 'median', 3);
-            [epoched_data.mua, ~] = MTF_rejectartifacts(data.mua, 'median', 3);
+            [data.lfp, ~] = MTF_rejectartifacts(data.lfp, 'median', 3);
+            [data.csd, ~] = MTF_rejectartifacts(data.csd, 'median', 3);
+            [data.mua, ~] = MTF_rejectartifacts(data.mua, 'median', 3);
 
 
         % Baseline Correction for each channel and trial
@@ -890,10 +893,19 @@ for tt = 1:length(uniqueTrigTypes)
                 % LFP Baseline Correction
                 lfp_bsl(chct, trct, :) = squeeze(data.lfp(chct, trct, :)) - ...
                     mean(squeeze(data.lfp(chct, trct, baselineIdx)), 'omitnan');
-
+            end
+        end
+        % Baseline Correction for each channel and trial
+        for chct = 1:size(data.csd, 1)
+            for trct = 1:size(data.csd, 2)
                 % CSD Baseline Correction
                 csd_bsl(chct, trct, :) = squeeze(data.csd(chct, trct, :)) - ...
                     mean(squeeze(data.csd(chct, trct, baselineIdx)), 'omitnan');
+            end
+        end
+                % Baseline Correction for each channel and trial
+        for chct = 1:size(data.mua, 1)
+            for trct = 1:size(data.mua, 2)
 
                 % MUA Baseline Correction (if available)
                 if ~isempty(mua_bsl)
@@ -981,8 +993,9 @@ for tt = 1:length(uniqueTrigTypes)
     disp(['Baseline correction and plots for trigType ', num2str(trigType), ' have been saved successfully.']);
 
     % save mean
-    durationForTuningCurve = 100;
+    
     if ~isempty(mua_avg)
+        mua_avg = squeeze(mua_avg);
         tuningcurve(tt,:) = mean(mua_avg(:,baselineEndIdx:durationForTuningCurve),2);
     end
     
