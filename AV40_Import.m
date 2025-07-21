@@ -13,7 +13,7 @@ clc;
 
 inputDir = '/Volumes/Samsung03/Peter/pt056057/'; % Replace with your input directory
 figuresDir = '/Volumes/Samsung03/Peter/pt056057/estim'; % Replace with your output directory
-fileName = 'pt056057027.nev'; % Replace with your file name
+fileName = 'pt056057033.nev'; % Replace with your file name
 % inputDir = '/Volumes/Samsung03/data/AM/'; % Replace with your input directory
 % figuresDir = '/Volumes/Samsung03/data/AM/'; % Replace with your output directory
 % fileName = 'ke036037037.nev'; % Replace with your file name
@@ -26,7 +26,7 @@ fileName = 'pt056057027.nev'; % Replace with your file name
 % Example configuration
 config = struct();
 config.epochdata = 1; % boolean, want to epoch the data?
-config.epoch_tframe = [-50, 500]; % Epoch window in ms
+config.epoch_tframe = [-50, 200]; % Epoch window in ms
 config.ripplefs = 30000; % assumed ripple fs/adrate
 config.eyelinkfs = 1000; %assumed eyelink FS
 config.newadrate = 1000;          % Resampling rate
@@ -34,16 +34,16 @@ config.filters.lfp = [0.5, 300];  % LFP filter range (Hz)
 config.filters.mua = [300, 5000]; % MUA filter range (Hz)
 config.padding = 1000; % ms of padding for epoched data
 config.derivative = 2; % CSD is second (2) deriv, bipLFP is 1st deriv (1)
-config.trigger_channel = 29;  %  analog trigger channel for aud is hardcoded for now, sorry dear reader
-config.channels = [33:56];             % ephys data channels 1:24 or 33:56
+config.trigger_channel = 29;  %  analog trigger channel for aud is hardcoded at 29 for now, sorry dear reader, 9mgb, 46ctx
+config.channels = [1:24];             % ephys data channels 1:24 or 33:56
 config.channel_remap = true; % Enable ripple channel remapping 
-config.trigger_method = 'segment'; % 'digital', 'analog', 'VDDT', 'VST' *always use analog for aud epoching*
+config.trigger_method = 'analog'; % 'digital', 'analog', 'segment' for estim, 'VDDT', 'VST' *always use analog for aud epoching*
 config.segEntID = 1;
-config.trigger_threshold = 50;   % Threshold for analog trigger detection
+config.trigger_threshold = 50;   % Threshold for analog trigger detection, 50 for aud, 5000 for estim artifact
 config.event_entity_id = 1;       % Default Event Entity ID
 config.artifact_threshold = 3;    % Z-score threshold for artifact rejection
 config.checksync = 0; % check sync between ripple and eyelink, boolean
-config.get_deviant = 0; %boolean
+config.get_deviant = 1; %boolean
 config.event_sorting_method = [];%'oldtono';%'ev2_column';%'ev2_column'; % a string that picks 'oldtono' or an ev2 column; requires digital trigger method
 config.durationForTuningCurve = 50;
 config.selectedVariable = [];%'Modulation_Freq';%'Modulation_Freq'; % variable in event file to epoch to;requires digital trigger method
@@ -225,6 +225,15 @@ function [epoched_data] = data_import_v2(directory1, figuresDir, fileName, confi
         triggers_std = round(triggers_std(:) * config.ripplefs);  % convert to samples
         triggers_deviant = [];
         triggers_std_analog = [];
+    elseif contains(config.trigger_method,'stimArtifact') % find stim artifact
+ 
+        triggerChannel = config.trigger_channel;
+        [triggers_std] = get_segment_triggers(hFile, triggerChannel, config.trigger_threshold);
+        triggers_std_analog = triggers_std;
+        % Ensure column vectors
+        triggers_std = triggers_std(:);
+        triggers_deviant = [];
+        
    
     elseif contains(config.trigger_method,'ADDT')
     
@@ -1245,68 +1254,97 @@ end
 end
 
 
-function data = get_triggered_channel_data(hFile, channels, triggers, preTrigger, postTrigger, samplingRate)
-    % GET_TRIGGERED_CHANNEL_DATA - Import channel data around trigger times
-    %
+function [triggers_standard] = get_segment_triggers(hFile, analogChannel, threshold)
+    % GET_ANALOG_TRIGGERS - Detect first pulse of each pulse train in analog data
+    % repurposed get analog triggers function to find stimulation artifact
+    % to use as a trigger (forgot to record Stim in ripple)
     % Parameters:
-    % hFile: Handle to the Neuroshare file
-    % channels: Array of channel IDs to import
-    % triggers: Array of trigger timestamps (in seconds)
-    % preTrigger: Time (in seconds) before each trigger to include
-    % postTrigger: Time (in seconds) after each trigger to include
-    % samplingRate: Sampling rate of the analog data (Hz)
+    % hFile          - Handle to the Neuroshare file
+    % analogChannel  - Analog channel ID
+    % threshold      - Threshold for detecting rising edges
     %
-    % Output:
-    % data: 3D Matrix (channels x triggers x samples per epoch)
-
-    fprintf('Importing data around triggers from %d channels...\n', length(channels));
-
-    % Calculate the number of samples per epoch
-    samplesPerEpoch = round((preTrigger + postTrigger) * samplingRate);
-    numTriggers = length(triggers);
-    numChannels = length(channels);
+    % Outputs:
+    % triggers_standard - Indices of pulses exceeding threshold
+    % 
     
-    % Pre-allocate data matrix
-    data = NaN(numChannels, numTriggers, samplesPerEpoch);
+    %% Step 1: Retrieve Analog Data
+    [ns_RESULT, ~, analogData] = ns_GetAnalogData(hFile, analogChannel, 1, hFile.Entity(analogChannel).Count);
 
-    % Loop through each channel
-    for chIdx = 1:numChannels
-        ch = channels(chIdx);
-        fprintf('Processing Channel %d...\n', ch);
-        
-        % Loop through each trigger
-        for trigIdx = 1:numTriggers
-            triggerTime = triggers(trigIdx);
-            
-            % Calculate sample indices
-            startSample = round((triggerTime - preTrigger) * samplingRate) + 1;
-            endSample = startSample + samplesPerEpoch - 1;
-            
-            % Ensure indices are valid
-            if startSample < 1
-                warning('Trigger %d on channel %d starts before data begins. Skipping...', trigIdx, ch);
-                continue;
-            end
-            
-            try
-                % Retrieve the specific window of data
-                [ns_RESULT, ~, epochData] = ns_GetAnalogData(hFile, ch, startSample, samplesPerEpoch);
-                
-                if ~strcmp(ns_RESULT, 'ns_OK')
-                    warning('Failed to retrieve data for Trigger %d on Channel %d: %s', trigIdx, ch, ns_RESULT);
-                    continue;
-                end
-                
-                % Store data in pre-allocated array
-                data(chIdx, trigIdx, :) = epochData';
-                
-            catch ME
-                warning('Error processing Trigger %d on Channel %d: %s', trigIdx, ch, ME.message);
-            end
-        end
+    if ~strcmp(ns_RESULT, 'ns_OK')
+        error('Error retrieving analog data: %s', ns_RESULT);
     end
     
-    fprintf('Data import around triggers complete.\n');
+    
+    % check sampling rate
+for check = 1:length(hFile.FileInfo)
+    if isfield(hFile.FileInfo(check), 'FileTypeID') && ...
+       isfield(hFile.FileInfo(check), 'TimeSpan') && ...
+       isfield(hFile.FileInfo(check), 'Label')
+   
+        % Display File Info
+        fprintf('File Type: %s | Time Span: %.2f  | Sampling Rate: %s\n', ...
+            hFile.FileInfo(check).FileTypeID, ...
+            hFile.FileInfo(check).TimeSpan, ...
+            hFile.FileInfo(check).Label);
+        
+        % Validate Sampling Rate if TimeSpan is valid
+        if hFile.FileInfo(check).TimeSpan > 0
+            if contains(hFile.FileInfo(check).Label, '30 ksamp/sec')
+                fprintf('Found 30 kHz samp rate! The bar for success is low.\n');
+            else
+                warning('Check yourself before you wreck yourself, samp rate may not be 30k (Found: %s).', ...
+                    hFile.FileInfo(check).Label);
+            end
+        else
+            fprintf('Skipping entry %d: TimeSpan is zero or invalid.\n', check);
+        end
+    else
+        warning('Incomplete metadata in FileInfo entry %d. Missing FileTypeID, TimeSpan, or Label.', check);
+    end
+end
+
+
+
+
+    %% Step 2: Detect All Rising Edges
+    allTriggers = find(diff(analogData > threshold) == 1); % Rising edge detection
+    if length(allTriggers) < 10
+        disp('WARNING: less than 10 triggers')
+    end
+
+    %% Step 3: Separate Pulse Trains
+    fs = 30000;
+    minPulseGap = 0.5 * fs; % Minimum gap to separate pulse trains
+    pulseTrainStarts = [];
+    
+    lastPulse = -inf; % Track the last pulse's index
+
+    % Identify train start and end points
+    for i = 1:length(allTriggers)
+        if allTriggers(i) - lastPulse > minPulseGap
+            % New pulse detected
+            pulseTrainStarts(end + 1) = allTriggers(i); %#ok<AGROW>
+
+        end
+        lastPulse = allTriggers(i);
+    end
+
+triggers_standard = pulseTrainStarts;
+
+
+    %% Step 4 Optional Plot for Visualization
+    figure;
+    plot(1:length(analogData), analogData);
+    hold on;
+    plot(triggers_standard, analogData(triggers_standard), 'go', 'MarkerSize', 8, 'LineWidth', 2);
+    
+    title('Analog Signal with Detected Standard and Deviant Triggers');
+    xlabel('Sample Index');
+    ylabel('Analog Signal');
+    
+    hold off;
+
+    disp(['Detected ', num2str(length(triggers_standard)), '  pulses trains ']);
 end
 
 
