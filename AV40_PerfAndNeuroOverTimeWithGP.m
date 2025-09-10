@@ -6,15 +6,15 @@ clear; close all; clc;
 
 %% Configuration Section
 %/Users/chase/Desktop/NKI/data/AV40/peter/pt056057/AttAudThal/pt056057022_analog_imported.mat
-pathName = '/Users/chase/Desktop/NKI/data/AV40/peter/pt056057/AttAudThal/';
-fileName = 'pt056057022_analog_imported.mat'; % ephys and Eyelink file
+pathName = 'H:\Peter\pt060061\AudThal\';
+fileName = 'pt060061023_analog_continuous'; % Eyelink file
 % Event type selection (options: 'ADDT', 'VDDT', 'VST'), VST under ...
 % construction!
 eventType = 'ADDT';
 
 % Sliding window configuration (in seconds)
 windowSize = 60; 
-stepSize = 10;
+stepSize = 5;
 minEventsThreshold = 1; 
 
 % Eyelink sampling rate
@@ -25,7 +25,7 @@ rippleFs = 30000; % assumed Fs of the analog trigs for alignment
 fs = 1000; % Sampling rate for alignment to ephys AND for wavelet
 freqRange = [0.5, 24]; % Broad frequency range
 alphaBand = [8, 14]; % Alpha amplitude
-GP_band = [1 50]; % generalized phase
+GP_band = [5 50]; % generalized phase
 
 if contains(eventType,'ADDT')
     deltaFreq = [1,1.3]; % Delta for ITC
@@ -33,13 +33,13 @@ else
     deltaFreq = [1.5,1.8];
 end
 
-preStimulusWindow = -300:-100; % Pre-stimulus period in ms
+preStimulusWindow = -400:-200; % Pre-stimulus period in ms
 
 % use CSD or bip LFP? (boolean)
 csd = 0;
-selchan = 6;
+selchan = 7;
 
-selchansforcorrelation = 1:15; % Spearman Corr figure
+selchansforcorrelation = 1:10; % Spearman Corr figure
 
 %% Load Eyelink Data
 disp('Loading EyelinkData...');
@@ -142,7 +142,10 @@ numChunks = size(continuousData, 2); % 1-second chunks
 chunkLength = size(continuousData, 3); % 1000 timepoints per chunk
 
 chunkStartTimes = (0:numChunks-1); % 1s chunks starting at 0s, 1s, 2s...
-
+    % preallocate
+        alphaAmp = NaN(numChannels, length(windowEdges));
+deltaITC = NaN(numChannels, length(windowEdges));
+gpITC = NaN(numChannels, length(windowEdges));
 
 %% Perform Sliding Window Analysis
 disp('Performing sliding window analysis...');
@@ -241,10 +244,7 @@ for i = 1:length(windowEdges)
         continue;
     end
 
-    % preallocate
-        alphaAmp = NaN(numChannelsDeriv, length(windowEdges));
-deltaITC = NaN(numChannelsDeriv, length(windowEdges));
-gpITC = NaN(numChannelsDeriv, length(windowEdges));
+
     %% extract Alpha Amplitude and compute Delta ITC
     for ch = 1:numChannelsDeriv
         % **Alpha Amplitude (Mean Over Full Pre-Stim Window)**
