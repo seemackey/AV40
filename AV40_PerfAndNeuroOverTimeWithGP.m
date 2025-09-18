@@ -6,8 +6,8 @@ clear; close all; clc;
 
 %% Configuration Section
 %/Users/chase/Desktop/NKI/data/AV40/peter/pt056057/AttAudThal/pt056057022_analog_imported.mat
-pathName = 'H:\Peter\pt060061\AudThal\';
-fileName = 'pt060061023_analog_continuous'; % Eyelink file
+pathName = 'H:\Peter\pt066067\AttAudThal\';
+fileName = 'pt066067024_analog_continuous'; % Eyelink file
 % Event type selection (options: 'ADDT', 'VDDT', 'VST'), VST under ...
 % construction!
 eventType = 'ADDT';
@@ -23,11 +23,11 @@ rippleFs = 30000; % assumed Fs of the analog trigs for alignment
 
 % Wavelet parameters
 fs = 1000; % Sampling rate for alignment to ephys AND for wavelet
-freqRange = [0.5, 24]; % Broad frequency range
+freqRange = [0.5, 36]; % Broad frequency range
 alphaBand = [8, 14]; % Alpha amplitude
 GP_band = [5 50]; % generalized phase
 
-if contains(eventType,'ADDT')
+if contains(eventType,'VDDT')
     deltaFreq = [1,1.3]; % Delta for ITC
 else
     deltaFreq = [1.5,1.8];
@@ -36,10 +36,10 @@ end
 preStimulusWindow = -400:-200; % Pre-stimulus period in ms
 
 % use CSD or bip LFP? (boolean)
-csd = 0;
-selchan = 7;
+csd = 1;
+selchan = 6;
 
-selchansforcorrelation = 1:10; % Spearman Corr figure
+selchansforcorrelation = 1:22; % Spearman Corr figure
 
 %% Load Eyelink Data
 disp('Loading EyelinkData...');
@@ -382,7 +382,7 @@ axis square
 
 % Across channel correlations
 
-AV40_PlotLaminarCorr(results,selchansforcorrelation);
+AV40_PlotLaminarCorrGP(results,selchansforcorrelation);
 fig3 = gcf;
 % save figures
 % Extract directory from resultsFile

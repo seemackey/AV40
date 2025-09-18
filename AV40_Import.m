@@ -11,13 +11,14 @@ clc;
 
 % Directories and file names
 
-inputDir = '/Volumes/Samsung03/Peter/pt056057/'; % Replace with your input directory
-figuresDir = '/Volumes/Samsung03/Peter/pt056057/estim'; % Replace with your output directory
-fileName = 'pt056057033.nev'; % Replace with your file name
+inputDir = 'H:\Peter\pt066067\'; % Replace with your input directory
+figuresDir = 'H:\Peter\pt066067\AttAudCtx'; % Replace with your output directory
+fileName = 'pt066067024.nev'; % Replace with your file name
+ % Replace with your file name
 % inputDir = '/Volumes/Samsung03/data/AM/'; % Replace with your input directory
 % figuresDir = '/Volumes/Samsung03/data/AM/'; % Replace with your output directory
 % fileName = 'ke036037037.nev'; % Replace with your file name
-
+%"H:\Peter\pt060061031.nev"
 
 
 %/Volumes/Samsung03/data/AM/ke036037037.nev
@@ -26,7 +27,7 @@ fileName = 'pt056057033.nev'; % Replace with your file name
 % Example configuration
 config = struct();
 config.epochdata = 1; % boolean, want to epoch the data?
-config.epoch_tframe = [-50, 200]; % Epoch window in ms
+config.epoch_tframe = [-50, 150]; % Epoch window in ms
 config.ripplefs = 30000; % assumed ripple fs/adrate
 config.eyelinkfs = 1000; %assumed eyelink FS
 config.newadrate = 1000;          % Resampling rate
@@ -35,7 +36,7 @@ config.filters.mua = [300, 5000]; % MUA filter range (Hz)
 config.padding = 1000; % ms of padding for epoched data
 config.derivative = 2; % CSD is second (2) deriv, bipLFP is 1st deriv (1)
 config.trigger_channel = 29;  %  analog trigger channel for aud is hardcoded at 29 for now, sorry dear reader, 9mgb, 46ctx
-config.channels = [1:24];             % ephys data channels 1:24 or 33:56
+config.channels = [33:56];             % ephys data channels 1:24 or 33:56
 config.channel_remap = true; % Enable ripple channel remapping 
 config.trigger_method = 'analog'; % 'digital', 'analog', 'segment' for estim, 'VDDT', 'VST' *always use analog for aud epoching*
 config.segEntID = 1;
@@ -43,11 +44,19 @@ config.trigger_threshold = 50;   % Threshold for analog trigger detection, 50 fo
 config.event_entity_id = 1;       % Default Event Entity ID
 config.artifact_threshold = 3;    % Z-score threshold for artifact rejection
 config.checksync = 0; % check sync between ripple and eyelink, boolean
-config.get_deviant = 1; %boolean
+config.get_deviant = 0; %boolean
 config.event_sorting_method = [];%'oldtono';%'ev2_column';%'ev2_column'; % a string that picks 'oldtono' or an ev2 column; requires digital trigger method
 config.durationForTuningCurve = 50;
 config.selectedVariable = [];%'Modulation_Freq';%'Modulation_Freq'; % variable in event file to epoch to;requires digital trigger method
 config.store_cont_data = 1; %takes a while, stores 1s chunks@newadrate
+
+% new artifact section to interpolate over artifacts (e.g. e-stim onsets)
+config.artifact.enabled    = false;
+config.artifact.windows_ms = [-3 3];   % one or more [start end] ms windows
+config.artifact.pad_ms     = 1;                % optional padding
+config.artifact.method     = 'linear';         % or 'pchip'
+config.artifact.signals    = {'mua'};    % subset (default = all present)
+
 
 %% MAIN FUNCTION CALL
 try
@@ -678,7 +687,12 @@ end
     % Save continuous data only if store_cont_data flag is set
     
     if config.store_cont_data == 1 
-        save(continuousFileBase, 'continuous_raw', 'triggers_std_ds', 'triggers_deviant_ds', 'triggers_std_analog', 'config', '-v7.3');
+        if exist('EyelinkData', 'var')
+           
+            save(continuousFileBase, 'continuous_raw','EyelinkData', 'triggers_std_ds', 'triggers_deviant_ds', 'triggers_std_analog', 'config', '-v7.3');
+        else
+            save(continuousFileBase, 'continuous_raw', 'triggers_std_ds', 'triggers_deviant_ds', 'triggers_std_analog', 'config', '-v7.3');
+        end
     end
 
 
@@ -693,24 +707,67 @@ end
 
 
 
-
 function plot_baseline_corrected_data(epoched_data, config, condition, figuresDir, fileName)
-    % PLOT_BASELINE_CORRECTED_DATA - Baseline correct and visualize epoched data
-    %
-    % Parameters:
-    % epoched_data - Struct containing LFP, CSD, MUA data
-    % config       - Configuration struct with epoch and sampling settings
-    % condition    - String: 'standard' or 'deviant' for labeling
-    % figuresDir   - Directory to save figures
-    % fileName     - Base name for saving figures
-    
+% PLOT_BASELINE_CORRECTED_DATA - Baseline-correct, optionally interpolate artifacts, and visualize epoched data
+%
+% Parameters:
+% epoched_data - Struct with fields .lfp, .csd, .mua (dims: channels x trials x time)
+% config       - Struct with fields:
+%                  .epoch_tframe    [tStartMS tEndMS]
+%                  .newadrate       sampling rate (Hz)
+%                  .trigger_method  string used in filenames
+%                Optional sub-struct for artifact interpolation:
+%                  .artifact.enabled      (logical) default: false
+%                  .artifact.windows_ms   (Nx2) [tStart tEnd] in ms, relative to epoch
+%                  .artifact.pad_ms       (scalar) pad added to each side (default: 0)
+%                  .artifact.method       'linear' (default) or 'pchip'
+%                  .artifact.signals      cellstr subset of {'lfp','csd','mua'} (default: all present)
+% condition    - 'standard' | 'deviant' (used for labels)
+% figuresDir   - directory to save figures
+% fileName     - base filename (no extension)
+
     disp(['Making figures for ', condition, ' data']);
 
-    % Define baseline correction period
-    baselineStart = -30;  % Start of baseline window (ms)
-    baselineEnd = -3;     % End of baseline window (ms)
+    %----- Time axis from data size (robust to sampling rate / integer ms mismatches)
+    % Use LFP as reference for time dimension; assume others match
+    nSamp = size(epoched_data.lfp, 3);
+    timeVector = linspace(config.epoch_tframe(1), config.epoch_tframe(2), nSamp); % ms
 
-    % Ensure baseline period is within the epoch timeframe
+    %----- Optional interpolation of sharp artifacts inside specified windows
+    if isfield(config, 'artifact') && isfield(config.artifact, 'enabled') && config.artifact.enabled
+        art = config.artifact;
+
+        % Defaults
+        if ~isfield(art, 'windows_ms') || isempty(art.windows_ms)
+            warning('config.artifact.enabled=true but no windows specified; skipping interpolation.');
+        else
+            if ~isfield(art, 'pad_ms') || isempty(art.pad_ms), art.pad_ms = 0; end
+            if ~isfield(art, 'method') || isempty(art.method), art.method = 'linear'; end
+            if ~isfield(art, 'signals') || isempty(art.signals)
+                % Use whatever fields exist in epoched_data
+                available = intersect({'lfp','csd','mua'}, fieldnames(epoched_data));
+                art.signals = available(:)';
+            end
+
+            % Pad windows if requested
+            wins = art.windows_ms;
+            if size(wins,2) ~= 2, error('artifact.windows_ms must be Nx2 [start end] in ms.'); end
+            wins = [wins(:,1)-art.pad_ms, wins(:,2)+art.pad_ms];
+
+            % Apply per-signal
+            for s = art.signals
+                sig = s{1};
+                if ~isfield(epoched_data, sig) || isempty(epoched_data.(sig)), continue; end
+                epoched_data.(sig) = interpolate_windows_3d(epoched_data.(sig), timeVector, wins, art.method);
+            end
+        end
+    end
+
+    %----- Define baseline correction period (ms)
+    baselineStart = -30;  % Start of baseline window (ms)
+    baselineEnd   = -3;   % End of baseline window (ms)
+
+    % Ensure within epoch
     if baselineStart < config.epoch_tframe(1)
         warning('Baseline start is outside the epoch range. Using start of epoch.');
         baselineStart = config.epoch_tframe(1);
@@ -720,116 +777,138 @@ function plot_baseline_corrected_data(epoched_data, config, condition, figuresDi
         baselineEnd = config.epoch_tframe(2);
     end
 
-    % Convert baseline window to sample indices
-    epochTimeframe = config.epoch_tframe(1):config.epoch_tframe(2); % Full epoch time vector
-    fs = config.newadrate; % Sampling rate (Hz)
+    % Convert baseline to indices on the actual time vector
+    [~, baselineStartIdx] = min(abs(timeVector - baselineStart));
+    [~, baselineEndIdx]   = min(abs(timeVector - baselineEnd));
+    baselineIdx = baselineStartIdx:baselineEndIdx;
 
-    % Find sample indices corresponding to baseline range
-    [~, baselineStartIdx] = min(abs(epochTimeframe - baselineStart));
-    [~, baselineEndIdx] = min(abs(epochTimeframe - baselineEnd));
-
-    baselineIdx = baselineStartIdx:baselineEndIdx; % Correct baseline indices
-
-    %% Baseline Correction
-    
+    %% Artifact rejection (median filter) BEFORE baseline correction (kept from original)
     [epoched_data.lfp, ~] = MTF_rejectartifacts(epoched_data.lfp, 'median', 3);
     [epoched_data.csd, ~] = MTF_rejectartifacts(epoched_data.csd, 'median', 3);
     [epoched_data.mua, ~] = MTF_rejectartifacts(epoched_data.mua, 'median', 3);
-    
-    % Initialize baseline-corrected arrays
-    lfp_bsl = zeros(size(epoched_data.lfp));
-    csd_bsl = zeros(size(epoched_data.csd));
-    mua_bsl = zeros(size(epoched_data.mua));
 
-    % Baseline Correction for LFP
-    for trct = 1:size(epoched_data.lfp, 2)
-        for chct = 1:size(epoched_data.lfp, 1)
-            lfp_bsl(chct, trct, :) = squeeze(epoched_data.lfp(chct, trct, :)) - ...
-                mean(squeeze(epoched_data.lfp(chct, trct, baselineIdx)), 'omitnan');
-        end
-    end
-
-    % Baseline Correction for CSD
-    for trct = 1:size(epoched_data.csd, 2)
-        for chct = 1:size(epoched_data.csd, 1)
-            csd_bsl(chct, trct, :) = squeeze(epoched_data.csd(chct, trct, :)) - ...
-                mean(squeeze(epoched_data.csd(chct, trct, baselineIdx)), 'omitnan');
-        end
-    end
-
-    % Baseline Correction for MUA
+    %% Baseline Correction (vectorized with implicit expansion; requires R2016b+)
+    lfp_bsl = epoched_data.lfp ...
+            - mean(epoched_data.lfp(:,:,baselineIdx), 3, 'omitnan');
+    csd_bsl = epoched_data.csd ...
+            - mean(epoched_data.csd(:,:,baselineIdx), 3, 'omitnan');
+    mua_bsl = [];
     if ~isempty(epoched_data.mua)
-        for trct = 1:size(epoched_data.mua, 2)
-            for chct = 1:size(epoched_data.mua, 1)
-                mua_bsl(chct, trct, :) = squeeze(epoched_data.mua(chct, trct, :)) - ...
-                    mean(squeeze(epoched_data.mua(chct, trct, baselineIdx)), 'omitnan');
-            end
-        end
+        mua_bsl = epoched_data.mua ...
+                - mean(epoched_data.mua(:,:,baselineIdx), 3, 'omitnan');
     end
 
     %% Plotting Parameters
+    numChannelsLFP = 1:size(lfp_bsl, 1);
+    numChannelsCSD = 1:size(csd_bsl, 1);
+    if ~isempty(mua_bsl), numChannelsMUA = 1:size(mua_bsl, 1); end
 
-    timeVector = linspace(config.epoch_tframe(1), config.epoch_tframe(2), size(lfp_bsl, 3));
-    numChannels = 1:size(lfp_bsl, 1);
-    numChannelsCSD = 1:size(csd_bsl,1);
-    
+    % Symmetric color limits scaled to 75% of max abs of the mean-across-trials image
+    lfp_mean = squeeze(mean(lfp_bsl, 2));
+    v = max(abs(lfp_mean(:))); lfp_caxis = 0.75 * [-v v];
 
-    % Determine Color Axis for CSD
-    csd_min = min(min(squeeze(mean(csd_bsl(:, :, :), 2))));
-    csd_max = max(max(squeeze(mean(csd_bsl(:, :, :), 2))));
-    csd_caxis = [-max(abs([csd_min, csd_max])) * 0.75, max(abs([csd_min, csd_max])) * 0.75];
-    
-    lfp_min = min(min(squeeze(mean(lfp_bsl(:, :, :), 2))));
-    lfp_max = max(max(squeeze(mean(lfp_bsl(:, :, :), 2))));
-    lfp_caxis = [-max(abs([lfp_min, lfp_max])) * 0.75, max(abs([lfp_min, lfp_max])) * 0.75];
+    csd_mean = squeeze(mean(csd_bsl, 2));
+    v = max(abs(csd_mean(:))); csd_caxis = 0.75 * [-v v];
 
-    % Determine Color Axis for MUA (if available)
     if ~isempty(mua_bsl)
-        mua_min = min(min(squeeze(mean(mua_bsl(:, :, :), 2))));
-        mua_max = max(max(squeeze(mean(mua_bsl(:, :, :), 2))));
-        mua_caxis = [-max(abs([mua_min, mua_max])) * 0.75, max(abs([mua_min, mua_max])) * 0.75];
+        mua_mean = squeeze(mean(mua_bsl, 2));
+        v = max(abs(mua_mean(:))); mua_caxis = 0.75 * [-v v];
     end
 
     %% Plot Figures
     fig = figure('Position', [200, 200, 1200, 700]);
 
-    % Plot LFP
+    % LFP
     subplot(1, 3, 1);
-    imagesc(timeVector, numChannels, squeeze(mean(lfp_bsl, 2)));
+    imagesc(timeVector, numChannelsLFP, lfp_mean);
     title(['Trial Avg. LFP (', condition, ')']);
-    xlabel('Time (ms)');
-    ylabel('Channel');
+    xlabel('Time (ms)'); ylabel('Channel');
     colormap(flipud(jet));
-    colorbar;
-    caxis(lfp_caxis);
+    colorbar; caxis(lfp_caxis);
 
-    % Plot CSD
+    % CSD
     subplot(1, 3, 2);
-    imagesc(timeVector, numChannelsCSD, squeeze(mean(csd_bsl, 2)));
-    title(['Trial Avg. bipLFP (', condition, ')']);
-    xlabel('Time (ms)');
-    ylabel('Channel');
-    colorbar;
-    caxis(csd_caxis);
+    imagesc(timeVector, numChannelsCSD, csd_mean);
+    title(['Trial Avg. CSD (', condition, ')']);
+    xlabel('Time (ms)'); ylabel('Channel');
+    colorbar; caxis(csd_caxis);
 
-    % Plot MUA (if available)
+    % MUA (optional)
     if ~isempty(mua_bsl)
         subplot(1, 3, 3);
-        imagesc(timeVector, numChannelsCSD, squeeze(mean(mua_bsl, 2)));
+        imagesc(timeVector, numChannelsMUA, mua_mean);
         title(['Trial Avg. MUA (', condition, ')']);
-        xlabel('Time (ms)');
-        ylabel('Channel');
-        colorbar;
-        caxis(mua_caxis);
+        xlabel('Time (ms)'); ylabel('Channel');
+        colorbar; caxis(mua_caxis);
     end
 
-    %% Save Figures
-    saveas(fig, fullfile(figuresDir, [fileName, '_',config.trigger_method, condition, '_avg_profiles.fig']));
-    saveas(fig, fullfile(figuresDir, [fileName, '_',config.trigger_method, condition, '_avg_profiles.jpg']));
+    %% Save
+    saveas(fig, fullfile(figuresDir, [fileName, '_', config.trigger_method, condition, '_avg_profiles.fig']));
+    saveas(fig, fullfile(figuresDir, [fileName, '_', config.trigger_method, condition, '_avg_profiles.jpg']));
     close(fig);
 
     disp(['Baseline correction and plots for ', condition, ' have been saved successfully.']);
+
 end
+
+% ========================= Helper =========================
+function Xout = interpolate_windows_3d(Xin, t_ms, wins_ms, method)
+% Linearly (or pchip) interpolate over specified time windows for a 3D array
+% Xin: [channels x trials x time], t_ms: [1 x nTime]
+% wins_ms: Nx2 [tStart tEnd] in ms
+% method: 'linear' or 'pchip'
+    if isempty(Xin), Xout = Xin; return; end
+    Xout = Xin;
+    nT = numel(t_ms);
+
+    for w = 1:size(wins_ms,1)
+        t1 = wins_ms(w,1); t2 = wins_ms(w,2);
+        if t2 <= t1, continue; end
+        mask = (t_ms >= t1) & (t_ms <= t2);
+        if ~any(mask), continue; end
+
+        idx_win = find(mask);
+        iL = idx_win(1) - 1;  % left neighbor
+        iR = idx_win(end) + 1; % right neighbor
+
+        % Edge cases: if window touches an edge, do nearest-value fill
+        if iL < 1 && iR <= nT
+            Xout(:,:,idx_win) = repmat(Xout(:,:,iR), 1, 1, numel(idx_win));
+            continue;
+        elseif iR > nT && iL >= 1
+            Xout(:,:,idx_win) = repmat(Xout(:,:,iL), 1, 1, numel(idx_win));
+            continue;
+        elseif iL < 1 && iR > nT
+            % Whole record masked; nothing sensible to do
+            continue;
+        end
+
+        % Interpolate between neighbors across time for every (chan,trial)
+        x = [t_ms(iL) t_ms(iR)];
+        xq = t_ms(idx_win);
+
+        % Compute weights for linear interpolation
+        %if strcmpi(method, 'linear') || numel(x) < 3
+            % weights per query point (row vector)
+            wR = (xq - x(1)) ./ (x(2) - x(1));  % 0..1
+            wL = 1 - wR;
+
+            % Broadcast across (chan x trial)
+            for k = 1:numel(idx_win)
+                Xout(:,:,idx_win(k)) = wL(k).*Xout(:,:,iL) + wR(k).*Xout(:,:,iR);
+            end
+        %else
+            % 'pchip' with just two anchor points degenerates to linear;
+            % but if you later expand to more anchors, this keeps the API.
+            % wR = (xq - x(1)) ./ (x(2) - x(1));  % same as linear
+            % wL = 1 - wR;
+            % for k = 1:numel(idx_win)
+            %     Xout(:,:,idx_win(k)) = wL(k).*Xout(:,:,iL) + wR(k).*Xout(:,:,iR);
+            % end
+        %end
+    end
+end
+
 
 function plot_baseline_corrected_data_mult_trigType(epoched_data, config, figuresDir, fileName)
  % Adapted to handle the new data structure with trigType grouping
